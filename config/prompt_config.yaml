@@ -1,0 +1,7 @@
+theory_exp:
+  prompts:
+    - cbt: "Generate an image that makes you feel and see the following main topics and their brief description, so it fits the 1024x1024 size without being cropped, avoid literal depictions of therapy settings: {txt_prompt}. Reflect the client’s interaction between thoughts, emotions, and behaviors. Do not include any written text, or letters in the image."
+
+    - psychodynamic: "Generate an image that makes you feel and see the following main topics and their brief description, so it fits the 1024x1024 size without being cropped, avoid literal depictions of therapy settings: {txt_prompt}. Reflect the client’s experience that may be informed by their current and past relationships. Do not include any written text, or letters in the image."
+
+    - narrative: "Generate an image that makes you feel and see the following main topics and their brief description, so it fits the 1024x1024 size without being cropped, avoid literal depictions of therapy settings: {txt_prompt}. Reflect the client’s experiences as part of their story as a person. Do not include any written text, or letters in the image."

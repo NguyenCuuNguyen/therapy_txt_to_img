@@ -1,0 +1,837 @@
+<p>TRANSCRIPT OF AUDIO FILE:</p>
+
+<p>______________________________________________________________________________</p>
+
+<p>BEGIN TRANSCRIPT:</p>
+
+<p><b>DR:</b>	So how you been?</p>
+
+<p><b>PT:</b>	Hm, all right.</p>
+
+<p><b>DR:</b>	Yeah?  What's new, anything?  You got a haircut didn't you?</p>
+
+<p><b>PT:</b>	Ah, since when?</p>
+
+<p><b>DR:</b>	Since I saw you last it looks like.</p>
+
+<p><b>PT:</b>	Maybe.</p>
+
+<p><b>DR:</b>	Yeah.  How—</p>
+
+<p><b>PT:</b>	I don't know.  Mom makes me get them occasionally.</p>
+
+<p><b>DR:</b>	I understand.  I know you're not thrilled about your hair cuts are you?  Oh well.  So what you been doing?</p>
+
+<p><b>PT:</b>	Um, the usual.</p>
+
+<p><b>DR:</b>	Okay.  Working on the computer mostly?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Uh—huh, good.  Enjoying it?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Doing some programming?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Some screen savers or something else?</p>
+
+<p><b>PT:</b>	Yeah working on that.</p>
+
+<p><b>DR:</b>	Uh-huh.  Okay still using the fractals?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay sounds good.  Have you got one up and running yet or not yet?</p>
+
+<p><b>PT:</b>	What do you mean?</p>
+
+<p><b>DR:</b>	Have you actually got it, I don't know how far along you are in the process.  Do you actually have screen savers up and running?  Okay.</p>
+
+<p><b>PT:</b>	And I've got them up and running on other computers, and it's always a big—</p>
+
+<p><b>DR:</b>	Oh.  Other computers in your house you mean or?</p>
+
+<p><b>PT:</b>	Actually even beyond.  I, so—</p>
+
+<p><b>DR:</b>	Huh.  Have you put it like on the web where people can download them?</p>
+
+<p><b>PT:</b>	Yeah, yeah.</p>
+
+<p><b>DR:</b>	I see.  Huh.</p>
+
+<p><b>PT:</b>	And done my first remote debugging.</p>
+
+<p><b>DR:</b>	Oh really?</p>
+
+<p><b>PT:</b>	Yes, ah, the wonderful case where it works on my computer but on their computer it crashes.</p>
+
+<p><b>DR:</b>	Huh.</p>
+
+<p><b>PT:</b>	Which is always very hard to figure.</p>
+
+<p><b>DR:</b>	So you're able to remotely go onto their computer and figure out why?</p>
+
+<p><b>PT:</b>	I, not exactly.  I figure out what the problem was.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	But yeah.</p>
+
+<p><b>DR:</b>	Well good, good.  So that's cool.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	So how's your sleep been lately?</p>
+
+<p><b>PT:</b>	Ah, typical.</p>
+
+<p><b>DR:</b>	Consistently inconsistent?</p>
+
+<p><b>PT:</b>	Yes.</p>
+
+<p><b>DR:</b>	Okay.  For example, when did you last wake up?</p>
+
+<p><b>PT:</b>	Um, maybe sometime after midnightish.</p>
+
+<p><b>DR:</b>	So you woke up around midnight?</p>
+
+<p><b>PT:</b>	Maybe 1:00.  I don't know.</p>
+
+<p><b>DR:</b>	Okay.  Do you remember when you fell asleep yesterday?</p>
+
+<p><b>PT:</b>	Ah, I had taken, I had woken up for a while around dinnertime, but, um, before that, I'd gone to bed sometime in the morning.</p>
+
+<p><b>DR:</b>	So you went to bed in the morning, woke up around dinner, ate, and then went back to bed?</p>
+
+<p><b>PT:</b>	Yeah.  I was up for maybe a couple of hours in there but yeah.</p>
+
+<p><b>DR:</b>	You was?  And do you remember what time about you went back to bed last night?</p>
+
+<p><b>PT:</b>	Oh, like 8 or 9.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	So you got maybe 4 or 5 hours sleep last night.</p>
+
+<p><b>PT:</b>	And then, um, some more before so.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	With a brief wake in the middle so.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Adding it up probably is actually more sleep than usual but.</p>
+
+<p><b>DR:</b>	Okay.  Are you sleeping—</p>
+
+<p><b>PT:</b>	That's what happens when I sort of flip from day to night.</p>
+
+<p><b>DR:</b>	Yeah.  Have you been sleeping more nights lately or not?</p>
+
+<p><b>PT:</b>	Ah, I've been awake at night for the last week or so.</p>
+
+<p><b>DR:</b>	Okay.  All right.  So what do you do during the night?  Are you just working on the computer mostly?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.  Okay.  Anything, and then sleeping during the day.  Ah, anything else you're doing besides computer work right now?</p>
+
+<p><b>PT:</b>	Ah, working occasionally.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Um, I feed the cat.  Um—</p>
+
+<p><b>DR:</b>	Um-hum, okay.</p>
+
+<p><b>PT:</b>	Um, not really.</p>
+
+<p><b>DR:</b>	Okay.  That's enough to keep you busy.  Do you watch TV much?</p>
+
+<p><b>PT:</b>	Hm, not really.</p>
+
+<p><b>DR:</b>	Not much that interests you?  Okay or, um, do you play games on the computer these days or is it more programming?</p>
+
+<p><b>PT:</b>	Sometimes.</p>
+
+<p><b>DR:</b>	Okay.  And what kind of games do you like, more role playing games?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.  All right and how, how's your mood been overall lately?</p>
+
+<p><b>PT:</b>	Ah, okay.</p>
+
+<p><b>DR:</b>	Not up too high or low, just somewhere in the middle?</p>
+
+<p><b>PT:</b>	Hm—</p>
+
+<p><b>DR:</b>	Or more one direction or the other?</p>
+
+<p><b>PT:</b>	A little bit worse than usual.</p>
+
+<p><b>DR:</b>	Okay.  A little bit worse.  Ah, [PATIENT NAME], there was a scale that went from +10 to —10 where +10 is the happiest day and —10 is the worse day and 0 is neutral, where would you say you are most days?</p>
+
+<p><b>PT:</b>	No idea.</p>
+
+<p><b>DR:</b>	It's hard to say?</p>
+
+<p><b>PT:</b>	It varies depending on the time of day.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Actually, ah, it might be something to do, um, when, when the pharmacy switched over to the generic Adderall.</p>
+
+<p><b>DR:</b>	You've noticed a difference?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Huh.</p>
+
+<p><b>PT:</b>	It seems I think it must, um, must, um, release faster and then, so it doesn't last as long as at my best, um, guess.</p>
+
+<p><b>DR:</b>	Now did they change from one type of generic to another type of generic or where you on brand name and then switched to generic?</p>
+
+<p><b>PT:</b>	I have no idea.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	But it's definitely, um, to a different.</p>
+
+<p><b>DR:</b>	Okay.  I suspect you've been getting a generic all along.  So they may have switched manufacturers.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	And it is very possible that that's made a difference.  The—</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	FDA has been looking into the generics and has discovered some of them just aren't the same so.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	But yeah, but yeah I was, been feeling more like I did when I was taking the other, ah, stimulants previous which [INAUDIBLE].</p>
+
+<p><b>DR:</b>	Okay.  Okay.  Um, let's see.</p>
+
+<p><b>PT:</b>	Where, um, where I had more of a withdrawal.</p>
+
+<p><b>DR:</b>	Okay.  All right.  How's your energy level been when you're awake?</p>
+
+<p><b>PT:</b>	Hm, not as, that good really.</p>
+
+<p><b>DR:</b>	Been decreased?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Low, average or where you'd like it to be?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.  How's your appetite?</p>
+
+<p><b>PT:</b>	Ah, about usual.</p>
+
+<p><b>DR:</b>	Okay.  Do you know how much you're weighing?  Have you checked?</p>
+
+<p><b>PT:</b>	I'm still about 120.</p>
+
+<p><b>DR:</b>	Okay and how tall are you?  Do you know, [PATIENT NAME]?</p>
+
+<p><b>PT:</b>	Ah, 5' 8.</p>
+
+<p><b>DR:</b>	Okay.  All right.  How's your concentration when you work on the computer?  Are you able to focus okay or is it difficult?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	It, it's adequate or?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	It's actually kind of funny and this actually I've been noticing for the last, ah, couple of years maybe that I can focus really well on certain things and not on others.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Like when I'm trying to read, read a book I just can't focus on it period.  It's very odd.</p>
+
+<p><b>DR:</b>	Okay.  But on the computer you can?</p>
+
+<p><b>PT:</b>	I can focus on programming or I can focus on reading on an internet forum but I can't focus on reading of a book.  I get distracted.  It's just strange.</p>
+
+<p><b>DR:</b>	Okay.  Huh.  Um, have you been having much anxiety lately or not too much?</p>
+
+<p><b>PT:</b>	No, not really.</p>
+
+<p><b>DR:</b>	Okay.  And are you enjoying things you're doing like doing the programming or playing the organ?</p>
+
+<p><b>PT:</b>	Yeah I guess.</p>
+
+<p><b>DR:</b>	Some?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.  Ah, are you enjoying them less than you used to?</p>
+
+<p><b>PT:</b>	Hum—um.</p>
+
+<p><b>DR:</b>	Or about the same?  Okay.  Any suicidal thoughts at all?</p>
+
+<p><b>PT:</b>	No.</p>
+
+<p><b>DR:</b>	Okay good.  Or any sense of fear or feeling unsafe at all lately?</p>
+
+<p><b>PT:</b>	No.</p>
+
+<p><b>DR:</b>	Okay.  Or any unusual hearing voices or seeing things that other people don't see like that?</p>
+
+<p><b>PT:</b>	No.</p>
+
+<p><b>DR:</b>	Okay.  Okay.  Um, medication wise, um, are you having any side effects that you're aware right now?</p>
+
+<p><b>PT:</b>	Not really besides the, um, the shift in effects sort of.</p>
+
+<p><b>DR:</b>	Okay.  Okay.</p>
+
+<p><b>PT:</b>	As I said what seems to be the effect is more like the, ah, I don't know, the Ritalin based one.  I don't remember what.</p>
+
+<p><b>DR:</b>	Yeah the Concerta maybe?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	That's the—</p>
+
+<p><b>DR:</b>	Okay.  Um, are you having the sweating much anymore?  I know that you said before the Rozerem had sort of cut that down.</p>
+
+<p><b>PT:</b>	Well I miss it sometimes.  It—</p>
+
+<p><b>DR:</b>	Um-hum.  I mean if you miss it, do you notice the sweating getting worse or not really?</p>
+
+<p><b>PT:</b>	Ah, it tends to, um, substantially worse.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Though, um, sometimes I get it anyway.</p>
+
+<p><b>DR:</b>	The—</p>
+
+<p><b>PT:</b>	Um, if I miss the Rozerem, I, I seem to.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	And it sort of comes and goes too just I think depending on my state of, my mental state so to speak, my mental/physical at the time.</p>
+
+<p><b>DR:</b>	That'll shift how much sweating your experience?</p>
+
+<p><b>PT:</b>	Yeah if I'm getting nervous or, you know.</p>
+
+<p><b>DR:</b>	Okay.  So—</p>
+
+<p><b>PT:</b>	I'm sort of wired, wired so to speak 1 day.</p>
+
+<p><b>DR:</b>	That'll make the sweating worse?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Yeah just depending on my physical/emotional state on a given day.</p>
+
+<p><b>DR:</b>	Okay.  Okay.  All right and, [PATIENT NAME], how are you doing about taking the medicines?  I know you said that Rozerem you miss it sometimes.  Are you able to get the Zoloft, the Effexor, and the Adderall in pretty much every day?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Actually the Rozerem I get in pretty much every day, though, um, actually when I missed it, um, I was also sort of, um, actually a couple of those times I was like, you know, not going to go back up the stairs and was just going to see if it did affect the sweating just for observation and it does.  It really seems to have an affect.</p>
+
+<p><b>DR:</b>	Okay well that's a good way to find out.  Okay.  Anything else going on that I didn't ask you about yet?</p>
+
+<p><b>PT:</b>	Ah, well I got a new graphics card.</p>
+
+<p><b>DR:</b>	Oh.  What does it allow you to do?</p>
+
+<p><b>PT:</b>	Um, it's faster.</p>
+
+<p><b>DR:</b>	Okay.  So—</p>
+
+<p><b>PT:</b>	And actually since I'm doing all my, I'm doing, my fractal program is accelerated on the graphics card or rather the graphics card is doing all the processing pretty much.</p>
+
+<p><b>DR:</b>	So the, the—</p>
+
+<p><b>PT:</b>	So it's, so it, yeah it, it's pretty insane.  Basically a modern graphics card, um, [INAUDIBLE] pretty much a super computer.</p>
+
+<p><b>DR:</b>	Huh.</p>
+
+<p><b>PT:</b>	The design.  It's a great, a very, a high number or cores.</p>
+
+<p><b>DR:</b>	Uh-huh.</p>
+
+<p><b>PT:</b>	Essentially.</p>
+
+<p><b>DR:</b>	So it allows the images to come out much quicker?  Is that what it does or are they—</p>
+
+<p><b>PT:</b>	Um, yeah it does.</p>
+
+<p><b>DR:</b>	Better graphics?</p>
+
+<p><b>PT:</b>	Yeah it can.  It, you can program it to do what you want essentially.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	And graphics is, is, um, you get a lot of pixels that don't require information from each other.  So it's easy to, um, spread across a bunch of processors.</p>
+
+<p><b>DR:</b>	Hm.</p>
+
+<p><b>PT:</b>	Whereas other algorithms are more difficult.</p>
+
+<p><b>DR:</b>	Huh.</p>
+
+<p><b>PT:</b>	The fractals, um, I'm iterating for each pixel so it's easy to spread that across.</p>
+
+<p><b>DR:</b>	Huh.</p>
+
+<p><b>PT:</b>	Because the pixels don't care about what their neighbors are doing.</p>
+
+<p><b>DR:</b>	Huh.  Well it sounds interesting.  So have, have you put it in your computer and you're using it already?</p>
+
+<p><b>PT:</b>	Yeah, yeah.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Yeah it's, it's in a fairly mature state, state of development.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	It's, right now I have about 20 different equations to pick and choose from.</p>
+
+<p><b>DR:</b>	Wow.</p>
+
+<p><b>PT:</b>	And to mix in with maybe 10, um, coloring formulas and a few different palates.</p>
+
+<p><b>DR:</b>	Huh.</p>
+
+<p><b>PT:</b>	And I add another equation when I think of a good one.</p>
+
+<p><b>DR:</b>	Uh-huh.  Well good.  Sounds like you're having fun with it.  Well good, um, all right.  Do you feel like the medications are adequate at this point or do you feel like we need to make changes?</p>
+
+<p><b>PT:</b>	Ah, I don't know.  We switched insurance companies so the generic issue might just dissolve because they're—</p>
+
+<p><b>DR:</b>	That's right.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	That's right.  Your mom told me about that.  Yeah that maybe too why you get a different—</p>
+
+<p><b>PT:</b>	Well no, no.  This was, this, the generic was from the old insurance.</p>
+
+<p><b>DR:</b>	Oh it was?</p>
+
+<p><b>PT:</b>	Old, old, um, insurance pharmacy.</p>
+
+<p><b>DR:</b>	So you have—</p>
+
+<p><b>PT:</b>	Now, now we're switching to a new one so.</p>
+
+<p><b>DR:</b>	So you haven't got the new prescription yet?</p>
+
+<p><b>PT:</b>	Actually we just got it like yesterday and I haven't had a chance to take it yet.</p>
+
+<p><b>DR:</b>	Okay yeah.  So maybe we should wait and see with a new insurance company and the new pharmaceutical plan.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Till we get, what's the effectiveness of the, of the medicine.</p>
+
+<p><b>PT:</b>	Well it'll be interesting, just look at the pill and I'll see—</p>
+
+<p><b>DR:</b>	Yeah.</p>
+
+<p><b>PT:</b>	Because, um, all these new various generics tend to look different.</p>
+
+<p><b>DR:</b>	Right.</p>
+
+<p><b>PT:</b>	Might just be it's the same as the original one.</p>
+
+<p><b>DR:</b>	That would be nice.</p>
+
+<p><b>PT:</b>	[INAUDIBLE].</p>
+
+<p><b>DR:</b>	Make things more consistent.</p>
+
+<p><b>PT:</b>	Or they might go and switch to another generic because one's cutting costs and—</p>
+
+<p><b>DR:</b>	That tends to happen.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Well they why don't we leave things alone for now if that's okay with you?  Just to get—</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Get some standardization and decide—</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Maybe next time if things are going smoothly, and if, if you're having a rough spell before, then you can always call or have your mom call me.  Does that sound okay?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay good.  So have your mom join us for a minute?</p>
+
+<p><b>PT:</b>	Sure.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	I mean it's not, I'm not like having an awful time.  It's just, ah—</p>
+
+<p><b>DR:</b>	Just a slight noticeable difference?</p>
+
+<p><b>PT:</b>	Ah, moderate difference.</p>
+
+<p><b>DR:</b>	Moderate?</p>
+
+<p><b>PT:</b>	It's moderately worse.</p>
+
+<p><b>DR:</b>	Okay.  Come join us.  Okay.  [PATIENT NAME] was just letting me know that there has been a change in the, ah, generic Adderall that he had received.</p>
+
+<p><b>CG:</b>	Yeah.</p>
+
+<p><b>DR:</b>	And he thought maybe there was a difference in efficacy with the change, but he also reminded me that with a new insurance plan, there's going to be another new pharmaceutical—</p>
+
+<p><b>CG:</b>	We just got that yesterday, so I just glanced at the pills.  I didn't really see—</p>
+
+<p><b>PT:</b>	What did they look like?</p>
+
+<p><b>CG:</b>	Is there, well they kind of looked like the new ones you have.</p>
+
+<p><b>PT:</b>	Well were they round or oval?</p>
+
+<p><b>CG:</b>	Oval.  No they're not round, kind of football shaped I think.</p>
+
+<p><b>PT:</b>	Cause yeah the other ones were football shaped.  I mean, ah, the original ones were just round I believe.</p>
+
+<p><b>DR:</b>	Okay.  Well let's wait and see.</p>
+
+<p><b>PT:</b>	Circular whereas—</p>
+
+<p><b>DR:</b>	See how it all works out and I told [PATIENT NAME] if it's working, if the effects seem to be less, you could let, you know, you can get a hold of me and we can talk about options.  I don't know how many different generic manufactures there are see for Adderall.  I don't know if they're—</p>
+
+<p><b>CG:</b>	Well if they're like, I mean I know with the Lithium with the old place they changed like every, yeah so if there's no control who they're going pick to go to.</p>
+
+<p><b>DR:</b>	Yeah.  You know another option is to go with a brand name.  I don't know how much more expensive that would be, though.</p>
+
+<p><b>CG:</b>	I could look it up.</p>
+
+<p><b>DR:</b>	It would be more standardized.</p>
+
+<p><b>CG:</b>	Um—</p>
+
+<p><b>DR:</b>	But sometimes it makes a huge financial difference too, though.</p>
+
+<p><b>CG:</b>	That is usually the most expensive tier.  If there's a generic and you ask for the brand name specifically.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>CG:</b>	That's usually the most, but for that drug I don't now.</p>
+
+<p><b>DR:</b>	I don't know either, and, [PATIENT NAME], another option would be we could always work on adjusting the dosage.  Sometimes the difference is the potency.  Sometimes the difference is the, ah—</p>
+
+<p><b>PT:</b>	Well—</p>
+
+<p><b>DR:</b>	Rate or release.</p>
+
+<p><b>PT:</b>	I, I, I, if I had to say I think it's, I very strongly suspect its rate of release related.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Just because the symptoms changed.  Sort of, I was sort of getting more of the withdrawal like I did with the old whatever it was.</p>
+
+<p><b>DR:</b>	Well they found to be true.  There's an article on my bulletin board in the waiting room that talks about the FDA investigated Wellbutrin XL, and they found that the generic was released much quicker than the brand name extended release which is not always a good thing with an extended release formula of these medicines.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	But let's leave it the way it is for now then if that's okay with you?</p>
+
+<p><b>PT:</b>	Well what, actually, ah, um, I might want to look at the new one to see if, if it's different from the, see if it's the same generic or not if that makes a difference.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Cause—</p>
+
+<p><b>CG:</b>	They can send different generics.</p>
+
+<p><b>PT:</b>	But, um—</p>
+
+<p><b>CG:</b>	At random.</p>
+
+<p><b>PT:</b>	But well—</p>
+
+<p><b>CG:</b>	The best deals that month.</p>
+
+<p><b>PT:</b>	Well yeah but see because would the markings be consistent—</p>
+
+<p><b>CG:</b>	Yeah.</p>
+
+<p><b>PT:</b>	For the same generic?</p>
+
+<p><b>CG:</b>	I think so.  Well the markings, well whatever.</p>
+
+<p><b>PT:</b>	I mean, ah, if it's generic and—</p>
+
+<p><b>CG:</b>	I don't know if it has it on the bottle.</p>
+
+<p><b>PT:</b>	Wouldn't it be—</p>
+
+<p><b>CG:</b>	Generic like—</p>
+
+<p><b>DR:</b>	The manufacturer?  I don't believe it usually does.  It just says it's generic for us.</p>
+
+<p><b>CG:</b>	Yeah.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Yeah.  Any other issues regarding [PATIENT NAME] that you thought we should discuss?</p>
+
+<p><b>CG:</b>	Ah, not really.  I assumed you talked about whether it was the thyroid as a possibility, [PATIENT NAME].</p>
+
+<p><b>PT:</b>	Oh, ah, I forgot to mention that.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	When did I stop taking that?</p>
+
+<p><b>DR:</b>	We stopped it—</p>
+
+<p><b>PT:</b>	It's possible that just happened.  That might've coincided with the timing on this—</p>
+
+<p><b>DR:</b>	Switch of the generic?</p>
+
+<p><b>PT:</b>	I'm not sure.  I don't quite, in June, though.</p>
+
+<p><b>DR:</b>	It was [DATE] I believe.</p>
+
+<p><b>PT:</b>	Okay.  So that does coincide.  I wonder.</p>
+
+<p><b>CG:</b>	I believe it does yeah.</p>
+
+<p><b>DR:</b>	Hm, well so it's a question, ah, so it's a question is it, was it helping perhaps?  Um, and you didn't have—</p>
+
+<p><b>PT:</b>	[INAUDIBLE].</p>
+
+<p><b>DR:</b>	Best usage.  I mean 1 option would be to go back on a lower dose of it if you wanted to.  Instead of 50 mcg, maybe 25 mcg to see if you felt some benefit maybe and, ah, maybe it wouldn't suppress your TSH.  Do you, would you like to try something like that or, or not?</p>
+
+<p><b>PT:</b>	No I—</p>
+
+<p><b>CG:</b>	Is this a theoretical question?</p>
+
+<p><b>PT:</b>	I mean how long would that one have taken for the, ah, for the, um, effect to sort of wear off after stopping taking it?  That's—</p>
+
+<p><b>DR:</b>	Well typically 1 to 4 weeks is kind of in the ballpark.  It's not instantly but.</p>
+
+<p><b>PT:</b>	Well that makes it more complicated, doesn't it?</p>
+
+<p><b>DR:</b>	Yeah.</p>
+
+<p><b>PT:</b>	Because, um, I didn't notice anything if any difference immediately but, um, quite possible this had nothing to do with the generic and has everything to do with that.</p>
+
+<p><b>DR:</b>	It is possible, and the only way to know that would be to keep the generic the same if we could and go back on [INAUDIBLE] to see if there was a noticeable difference.</p>
+
+<p><b>PT:</b>	Yeah.  I think that's probably the best thing to do.</p>
+
+<p><b>DR:</b>	Okay.  Why don't we try the lower dose then—</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	The 25 just to see?</p>
+
+<p><b>CG:</b>	I have—</p>
+
+<p><b>DR:</b>	You have some at home?</p>
+
+<p><b>CG:</b>	I'm thinking through.  I guess you better write a prescription but I—</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>CG:</b>	Think I have some at home.  Do you have down what—</p>
+
+<p><b>PT:</b>	Might still be some left.</p>
+
+<p><b>CG:</b>	He was getting?</p>
+
+<p><b>DR:</b>	He was getting 50 mcg.</p>
+
+<p><b>CG:</b>	So that would—</p>
+
+<p><b>DR:</b>	We'll cut that in half.</p>
+
+<p><b>CG:</b>	[INAUDIBLE].</p>
+
+<p><b>DR:</b>	Yeah.  Um—</p>
+
+<p><b>CG:</b>	I'm pretty sure, I usually don't throw things away cause somebody will use it somewhere along the line.</p>
+
+<p><b>DR:</b>	And you want to do a local or a mail order prescription?</p>
+
+<p><b>CG:</b>	Um—</p>
+
+<p><b>DR:</b>	To start with?  They're both—</p>
+
+<p><b>CG:</b>	Let's just do local.</p>
+
+<p><b>DR:</b>	With refills for now?</p>
+
+<p><b>CG:</b>	I think [NAME OTHER] sees you in a couple of weeks.</p>
+
+<p><b>PT:</b>	Because we have no idea how much we have left.</p>
+
+<p><b>CG:</b>	I may not even need it.  I—</p>
+
+<p><b>PT:</b>	Might be there's 6 pills left in the bottle or it might be 3 months' worth or it might not be any at all.</p>
+
+<p><b>CG:</b>	Usually it's 3 months' worth because you always cancel something right after I've ordered it.</p>
+
+<p><b>DR:</b>	That's essentially the way it works.</p>
+
+<p><b>CG:</b>	Just—</p>
+
+<p><b>DR:</b>	Okay.  Now, [PATIENT NAME], if this doesn't seem to help, it's also possible that it's because it's too low of a dose, but it's a reasonable dose to start with.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Let's try it and see, and if in a month or so you feel like it's not doing anything, we can talk about whether we should go up a little bit.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	Okay.  So I [INAUDIBLE] you a couple of refills so you'll have refills if you need them.  Okay.  Anything else you can think of?</p>
+
+<p><b>CG:</b>	Do you have a handle, I don't know if this is really something you would know.  Um, we've been going through this thing you had to send back to the pharmacy whether they need it so they can approve.  Do you know if they're going to do that?  I called them and they said they would only do it the first, when they're getting things set up, but—</p>
+
+<p><b>DR:</b>	Uh-huh.</p>
+
+<p><b>CG:</b>	They, they said that again with another prescription I had.  So do you know how they usually do it?</p>
+
+<p><b>DR:</b>	No and what I'm finding is the pharmacies are—</p>
+
+<p><b>PT:</b>	They apply bureaucracy  for the maximum possible duration so they don't have to pay for it.</p>
+
+<p><b>DR:</b>	It seems that way, [PATIENT NAME], at times.  What I'm finding is there are many added layers of bureaucracy these days.  They're asking for many more reviews.</p>
+
+<p><b>CG:</b>	It's just slowing things down a lot.</p>
+
+<p><b>DR:</b>	Yeah I understand.</p>
+
+<p><b>CG:</b>	To get prescriptions.  I was kind of curious.</p>
+
+<p><b>DR:</b>	Yeah and—</p>
+
+<p><b>PT:</b>	They add the bureaucracy.</p>
+
+<p><b>DR:</b>	It, it seems like almost every month it's getting worse, not just with your pharmacy but across the board.  It, I'm getting many more requests for authorizations or added information and it just seems to be a trend just to warn you.</p>
+
+<p><b>CG:</b>	Yeah.</p>
+
+<p><b>DR:</b>	So you may want to give yourself plenty of time, and I think you're, I think it is trying to save cost but whether it's effective or not I don't know.  I just know it's a lot more bureaucracy and a lot more time consuming.</p>
+
+<p><b>CG:</b>	Figure out whether the paperwork is worth the extra week of pills or something I guess.</p>
+
+<p><b>DR:</b>	I guess.  All right well why don't we schedule about a month down the road then, [PATIENT NAME], just to check back and see how the [INAUDIBLE].</p>
+
+<p><b>PT:</b>	What, you, you don't think [INAUDIBLE] just ignore it.  Doesn't require any work on their part to do that.</p>
+
+<p><b>CG:</b>	Somebody has to make a phone call.  Someone, well actually mine was a recorded call so.</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	So let's see, today is [DATE], so somewhere around that time in August.  That's a Monday.  Um, do you want to shoot for a morning or afternoon time or flip a coin?</p>
+
+<p><b>CG:</b>	Um, oh dear it's difficult.  Let's see [NAME OTHER]'s schedule.  In the middle of the day is best.</p>
+
+<p><b>DR:</b>	Is best?  Okay.</p>
+
+<p><b>CG:</b>	I think she's like 9:00 to 3:00ish.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Except when she has—</p>
+
+<p><b>CG:</b>	Um, Friday she doesn't have anything at all so that's—</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>CG:</b>	Another option that I wouldn't have to [INAUDIBLE] with.</p>
+
+<p><b>DR:</b>	Okay so we could do, um, either let's see we could do Friday, [DATE], which is essentially 4 weeks.  Is that 4 weeks, 1, 2—</p>
+
+<p><b>CG:</b>	Actually she hasn't started school that week yet.</p>
+
+<p><b>DR:</b>	Okay.  Do you want that week?</p>
+
+<p><b>CG:</b>	Yeah.  That, that probably would work.</p>
+
+<p><b>DR:</b>	Do like, ah, 2:00 or 1:00?</p>
+
+<p><b>CG:</b>	I think, [INAUDIBLE], [PATIENT NAME].  Do you know when you're going to be off that day?</p>
+
+<p><b>PT:</b>	Ah, what day?  What's the date?</p>
+
+<p><b>DR:</b>	Friday, [DATE].</p>
+
+<p><b>PT:</b>	[DATE] okay and today is—</p>
+
+<p><b>CG:</b>	I don't even, I don't know.  I think 2:00 sounds good to me.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	What day is today?</p>
+
+<p><b>CG:</b>	Ah, I don't know.  It's, I really don't, [PATIENT NAME].</p>
+
+<p><b>DR:</b>	Today is [DATE].</p>
+
+<p><b>CG:</b>	[INAUDIBLE].</p>
+
+<p><b>PT:</b>	Okay so then on—</p>
+
+<p><b>CG:</b>	The moon is full tonight so I guess next Friday it'll be close to full too.  I mean the Friday, if that makes a difference.</p>
+
+<p><b>DR:</b>	Okay.</p>
+
+<p><b>PT:</b>	Well, unfortunately, my extended weather forecasts don't.</p>
+
+<p><b>CG:</b>	Why don't write a computer program, [PATIENT NAME]?</p>
+
+<p><b>PT:</b>	Well no it's only about as accurate as a weather forecast.</p>
+
+<p><b>DR:</b>	Well I wouldn't expect—</p>
+
+<p><b>PT:</b>	In other words—</p>
+
+<p><b>DR:</b>	Any side effects from this at all but just give me a call.</p>
+
+<p><b>PT:</b>	In other words, I can predict it about a week out with reasonable accuracy.</p>
+
+<p><b>DR:</b>	All right, [PATIENT NAME], let's give it a try.  Okay?</p>
+
+<p><b>PT:</b>	Yeah.</p>
+
+<p><b>DR:</b>	All right.  Take care of yourself.  Good luck with all your programming.  Okay?  All right.  See you later.</p>
+
+<p><b>PT:</b>	Bye.</p>
+
+<p><b>DR:</b>	Bye bye.</p>
+
+<p>Research to Listen, Understand and Analyze Physician—Patient Interactions</p>
+
+<p>END TRANSCRIPT</p>

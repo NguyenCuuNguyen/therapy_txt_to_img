@@ -1,0 +1,511 @@
+<p>TRANSCRIPT OF AUDIO FILE:</p>
+
+<p>______________________________________________________________________________</p>
+
+
+<table>
+<tr>
+<td>
+<b>Interaction Type:</b> Depression<br><br>
+<b><i>Patient Information:</i></b><br><br>
+<b>Gender:</b> Female<br><br>
+<b>Age:</b> 55-74 years<br><br>
+<b>Race:</b> Caucasian/White<br><br>
+<b>Current Treatments (Type):</b> Adderall XR (New)<br>
+Cymbalta (New)
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+<b>Recording ID:</b> 28698<br><br>
+<b><i>Physician Information:</i></b><br><br>
+<b>Specialty:</b> Psychiatrist<br><br>
+<b>Gender:</b> Male<br><br>
+<b>Years in Practice:</b> 21-30 years<br><br><br><br>
+</td>
+</tr>
+</table>
+
+<br><br>
+
+<p>BEGIN TRANSCRIPT:</p>
+
+<p><b>DR:</b> So, what brings you in today?  What kinds of problems are you having?</p>
+
+<p><b>PT:</b> Um, well, I have a history of depression.</p>
+
+<p><b>DR:</b> Um, how many years have you suffered from that?</p>
+
+<p><b>PT:</b> Probably all my life.</p>
+
+<p><b>DR:</b> All your life?</p>
+
+<p><b>PT:</b> But never really did anything about it until my mother died in 1995.</p>
+
+<p><b>DR:</b> And then you had a very deep depression then?</p>
+
+<p><b>PT:</b> Yes, and uh, it's not doing well at all.</p>
+
+<p><b>DR:</b> Now, have you been consistently on medication for depression, or did they start it, you got better, and they stopped it, or -</p>
+
+<p><b>PT:</b> Um, I think I've, I kind of wasn't a very good patient initially, you know -</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I took it for a while and then I guess I stopped, then I would start to feel bad again, and I would go back.  Um, but I would say probably the last, since 9, probably 10 years, I've been on -</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> An antidepressant, um, consistently.</p>
+
+<p><b>DR:</b> Now you, you, evidently you've been under treatment, you're switching uh, doctors, is this because of insurance problems, or?</p>
+
+<p><b>PT:</b> Insurance problems -</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> And my husband doesn't like me to, it costs too much money, and he pays for my benefits.</p>
+
+<p><b>DR:</b> Okay, so he wants you to go to 1 of the in treatment doctors that are available through your plan?</p>
+
+<p><b>PT:</b> Yes.</p>
+
+<p><b>DR:</b> Okay.  How old are you now?</p>
+
+<p><b>PT:</b> [AGE].</p>
+
+<p><b>DR:</b> All right, and you mentioned you're married, how long have you been married?</p>
+
+<p><b>PT:</b> Um, 2 years.</p>
+
+<p><b>DR:</b> First marriage, second, or -</p>
+
+<p><b>PT:</b> It's my second.</p>
+
+<p><b>DR:</b> Uh, your current address?</p>
+
+<p><b>PT:</b> [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> And a phone number there?</p>
+
+<p><b>PT:</b> [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> All right, um, do you know your social security number off hand?</p>
+
+<p><b>PT:</b> [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> And where were you born?</p>
+
+<p><b>PT:</b> [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> Do you have any allergies to any medicines at all?</p>
+
+<p><b>PT:</b> None that I'm aware of.</p>
+
+<p><b>DR:</b> Any physical problems, like blood pressure, diabetes, no?</p>
+
+<p><b>PT:</b> No, just uh, GERD.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> Acid reflux.</p>
+
+<p><b>DR:</b> Are you treated for that with anything, or -</p>
+
+<p><b>PT:</b> Nexium.</p>
+
+<p><b>DR:</b> And um, you have a primary care doctor?</p>
+
+<p><b>PT:</b> [PHYSICIAN NAME OTHER].  [LAUGHING].</p>
+
+<p><b>DR:</b> [PHYSICIAN NAME OTHER]?</p>
+
+<p><b>PT:</b> [PHYSICIAN NAME OTHER].  And she's in [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> That's down in the shore.  And then who is, who was your doctor, your psychiatrist, your previous one?</p>
+
+<p><b>PT:</b> Uh, [PHYSICIAN NAME OTHER].</p>
+
+<p><b>DR:</b> Where is he located?</p>
+
+<p><b>PT:</b> He's in [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> Okay, so it's, you're, was it a long trip here today, or -</p>
+
+<p><b>PT:</b> Actually, I think it's about the same.</p>
+
+<p><b>DR:</b> The same?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> All right.  Have you had any periods of highs where you don't sleep, or you're up all night and -</p>
+
+<p><b>PT:</b> Not that I, [LAUGHING], maybe, I don't know.  Um, none that I would admit to.</p>
+
+<p><b>DR:</b> All right.</p>
+
+<p><b>PT:</b> No, when I'm unusually stressed, yes, I have difficulty sleeping, and it can go for a couple days, but -</p>
+
+<p><b>DR:</b> But this has been basically considered, um, like a recurrent depression and then normal in between, or -</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I mean I don't perceive any like, too, like mania symptoms.  I wish.</p>
+
+<p><b>DR:</b> All right, no, you don't wish for that.</p>
+
+<p><b>PT:</b> I know.</p>
+
+<p><b>DR:</b> It's in the back of the head, right?</p>
+
+<p><b>PT:</b> [LAUGHING].</p>
+
+<p><b>DR:</b> All right.  So what has been the most favorable medicine for you, to keep things under control?</p>
+
+<p><b>PT:</b> I think Effexor was, that was always the best for me.</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> But it was, it made me a little jittery.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> So, um, since I've been on the Cymbalta, it seems like it's really, it works really well.</p>
+
+<p><b>DR:</b> How much do you take with that?  Thirty or 60 mg?</p>
+
+<p><b>PT:</b> Sixty.</p>
+
+<p><b>DR:</b> Okay, does uh, do they have you on anything else, or just the Cymbalta?</p>
+
+<p><b>PT:</b> The um, I'm taking Adderall.</p>
+
+<p><b>DR:</b> Oh, Adderall?</p>
+
+<p><b>PT:</b> The time release.</p>
+
+<p><b>DR:</b> What size do you take there?</p>
+
+<p><b>PT:</b> I guess it's the 30.  Is that the time release?</p>
+
+<p><b>DR:</b> And that's once a day?</p>
+
+<p><b>PT:</b> Yeah, once a day.</p>
+
+<p><b>DR:</b> And that's what, did they diagnose ADHD?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> All right.  Oh, when did they make that diagnosis?</p>
+
+<p><b>PT:</b> About 2 years ago.</p>
+
+<p><b>DR:</b> You probably noticed things growing up, like going through school, you had problems paying attention?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I was always the kid that, good student that won't shut up.  You know, disruptive.</p>
+
+<p><b>DR:</b> [INAUDIBLE] didn't get off to a good start because it was mad at you all the time, right?</p>
+
+<p><b>PT:</b> [LAUGHING].</p>
+
+<p><b>DR:</b> All right.  Um, how is your mood now, would you say?</p>
+
+<p><b>PT:</b> Um, it's good.  I'm not -</p>
+
+<p><b>DR:</b> Yeah?</p>
+
+<p><b>PT:</b> I'm, I'm not unemployed, I'm working per diem and um, and I'm on unemployment and I'm stressed about finding a full time job.  I just, it took me 2 years, I got my CADC.</p>
+
+<p><b>DR:</b> What, what is that degree?</p>
+
+<p><b>PT:</b> Um, a, drug and alcohol counselor.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> And um, now I can't find anything and I'm feeling really frustrated.</p>
+
+<p><b>DR:</b> Don't be, the state funds will open up soon.</p>
+
+<p><b>PT:</b> [LAUGHING].</p>
+
+<p><b>DR:</b> They will, I'm, it's just, I mean, the money will get through the economy and the governor, will, he untighten the purse strings, you'll see, you'll find work.  You'll find a job.  And your husband is working meanwhile so you, you're okay financially?</p>
+
+<p><b>PT:</b> Yeah, yeah.  But my husband is very, um, the only time we ever argue is about money.  And he's very -</p>
+
+<p><b>DR:</b> Well, he's probably scared, right, with this economy, what does he do for a living?</p>
+
+<p><b>PT:</b> He works for [DEIDENTIFIED].  He has a good job and he has a good, um -</p>
+
+<p><b>DR:</b> And people always fight like this in -</p>
+
+<p><b>PT:</b> Right.</p>
+
+<p><b>DR:</b> But you have to under -</p>
+
+<p><b>PT:</b> It's very secure.</p>
+
+<p><b>DR:</b> That's good.</p>
+
+<p><b>PT:</b> Yeah, he does well.  He lost a lot of money in the market and started to go down.</p>
+
+<p><b>DR:</b> Um, more than 50%?</p>
+
+<p><b>PT:</b> No.</p>
+
+<p><b>DR:</b> He's all right, then.  My financial advisor says, "If it's 50% or less, you will be all right."</p>
+
+<p><b>PT:</b> [LAUGHING].</p>
+
+<p><b>DR:</b> Just wait it out.</p>
+
+<p><b>PT:</b> Yeah.  Close, but not -</p>
+
+<p><b>DR:</b> Yeah.  So the Cymbalta and the Adderall XR 30.  Are you taking anything else, or is that it?</p>
+
+<p><b>PT:</b> That's it, I think, yeah.</p>
+
+<p><b>DR:</b> So, generally you're in pretty good health.  I mean, you have some GERD, what do take for that, the Nexium?</p>
+
+<p><b>PT:</b> The Nexium.</p>
+
+<p><b>DR:</b> All right, Cymbalta, does that help with any aches or pains or anything like that?  It's supposed to be good.</p>
+
+<p><b>PT:</b> It might, because I have arthritis.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> And I had a um, recent knee replacement.</p>
+
+<p><b>DR:</b> Oh, which knee did you have done?</p>
+
+<p><b>PT:</b> My left knee.</p>
+
+<p><b>DR:</b> If you, um, you know, if you just do normal walking, there's no reason that shouldn't last.  They say 15 years, but my mom had them done in her 60s and her first, she had to have 1 replaced after 25 years and the other ones still there, and still going.</p>
+
+<p><b>PT:</b> Wow.</p>
+
+<p><b>DR:</b> And she just does normal walking, you know, you don't want to jog or do heavy  stuff.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> You know, that destroys them, but most of the time, they will last a very long time.</p>
+
+<p><b>PT:</b> That's a good, that's good to hear.</p>
+
+<p><b>DR:</b> Yeah.  They only say 15 years though, but they last longer than that.  I've seen athletes that last maybe 10 years because they're pounding -</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Doing jogging, and a lot of other stuff.  Be careful with it.</p>
+
+<p><b>PT:</b> Okay, I try.</p>
+
+<p><b>DR:</b> And you know to take precautions when you go to the dentist with antibiotics and all that stuff.  Do you want me to be able to talk at all to general practitioner?</p>
+
+<p><b>PT:</b> Sure.</p>
+
+<p><b>DR:</b> All right, I'll just put [PHYSICIAN NAME OTHER].  If they call, we'll, we can talk with them.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> All right, so we'll continue on the plan you're on.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> No suicidal thoughts or anything?</p>
+
+<p><b>PT:</b> No.</p>
+
+<p><b>DR:</b> Did you ever have them when you were severely depressed?</p>
+
+<p><b>PT:</b> When I was young, I tried to kill myself, when I was a little child.  And I was about [AGE].</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I'm only laughing because my mother, um, she was, she was probably never diagnosed, she was juvenile diabetic and she was very, um, [INAUDIBLE] to say the least.  And she always blamed it on her disease, but who knows?  But she, we would constantly fight, so 1 day I guess I, she was really, unusually cruel and I said, and I guess I said I might as well just kill myself and she said go ahead, so -</p>
+
+<p><b>DR:</b> She still alive?  You still talk with her?</p>
+
+<p><b>PT:</b> No, she's deceased, both my parents are deceased.</p>
+
+<p><b>DR:</b> Do you have children yourself, or -</p>
+
+<p><b>PT:</b> No.</p>
+
+<p><b>DR:</b> Now when you, um, left the doctor, how much medicine do you have on hand?</p>
+
+<p><b>PT:</b> I have enough Cymbalta for, I think, 3 more months.</p>
+
+<p><b>DR:</b> All right, so he gives you like a 90 day supply at a time?</p>
+
+<p><b>PT:</b> Yeah, um, 90 times 2, for the insurance.</p>
+
+<p><b>DR:</b> Okay, and the Adderall?</p>
+
+<p><b>PT:</b> I have, I only have 1 pill left.</p>
+
+<p><b>DR:</b> All right, so you will need a script for that today.  All right.  Do you have any um, problems with um, hearing things, voices, anything like that?</p>
+
+<p><b>PT:</b> No.</p>
+
+<p><b>DR:</b> With Cymbalta, I guess, and uh, Adderall, if you have any rashes, stop.  Usually lightheadedness, or dizziness, nausea, just eat first.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Um, you said you're on it already, and I think you probably have, you're not going to get any new side effects from those.  Now, you mentioned, I believe, you had seen a psychiatrist, you happen to know him, and uh, as a friend as well as your doctor, right?</p>
+
+<p><b>PT:</b> Correct.</p>
+
+<p><b>DR:</b> So um, and um, he was prescribing, now he's not going to do that, right?</p>
+
+<p><b>PT:</b> Right.</p>
+
+<p><b>DR:</b> These are um, I have 2 forms here, depending what your insurance has, some like one, some like the other, some like both.  What they are is disclaimers.  They just say if you have any problem with the medicine, you can stop immediately without calling me, but just call me to let me know what you've done.  Uh, if you have any rashes, definitely stop.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Um, the part I crossed out having to do with part of dyskinesia doesn't apply to these meds.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> All right.  You will periodically need blood work, just to make sure you're not having any problems.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> All right, you probably aren't having problems with this, we wait every 6 months to do it.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Um, let's see, today's date is the [DATE].  So read these, and then where the Xs are on the bottom, sign those.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> All right, any questions?</p>
+
+<p><b>PT:</b> I don't think so.</p>
+
+<p><b>DR:</b> All right, and that lets me talk with [PHYSICIAN NAME OTHER].</p>
+
+<p><b>PT:</b> Okay.  I signed one for [PHYSICIAN NAME OTHER], um, when I filled out -</p>
+
+<p><b>DR:</b> I think I've met [PHYSICIAN NAME OTHER] a few times at meetings.  His name is so familiar -</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Just don't -</p>
+
+<p><b>PT:</b> He's a really nice man, he just, uh -</p>
+
+<p><b>DR:</b> Okay, no alcohol or substance abuse problems?</p>
+
+<p><b>PT:</b> No, not at all.</p>
+
+<p><b>DR:</b> Good.  Well, what does your plan allow?  Do they allow you to initial evaluation, plus med checks when you come in?</p>
+
+<p><b>PT:</b> He says -</p>
+
+<p><b>DR:</b> [INAUDIBLE].</p>
+
+<p><b>PT:</b> Twelve sessions.</p>
+
+<p><b>DR:</b> Will they allow you to see a psychologist if you need to talk to someone?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> They will.</p>
+
+<p><b>PT:</b> And I, I did, um, back in March for about 8 months -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> That my, my father had died and it really brought up a lot of issues.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> And um, I think we still have a couple sessions left for the year if I wanted to go back.</p>
+
+<p><b>DR:</b> And who, who was that?</p>
+
+<p><b>PT:</b> [PHYSICIAN NAME OTHER].</p>
+
+<p><b>DR:</b> [PHYSICIAN NAME OTHER].</p>
+
+<p><b>PT:</b> She's uh, PhD and she's also in [DEIDENTIFIED], and I graduated.</p>
+
+<p><b>DR:</b> You graduated, she said?</p>
+
+<p><b>PT:</b> [LAUGHING], no, no, no, she didn't say that, but I, uh -</p>
+
+<p><b>DR:</b> If you, um, can skip 2 days in a row on your Adderall -</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> You will always find that when you need it, it will work.</p>
+
+<p><b>PT:</b> Oh, okay.</p>
+
+<p><b>DR:</b> Because the liver down regulates if you skip a few days.  You can probably -</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> If you need to focus every day then take it, but if there are days where you can be a little distracted and really don't care, then, uh -</p>
+
+<p><b>PT:</b> Okay, on the weekends -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> I can do that.</p>
+
+<p><b>DR:</b> And you'll find it will always kick in Monday and do its job the rest of the week.</p>
+
+<p><b>PT:</b> Okay, so that's good.</p>
+
+<p><b>DR:</b> I will see you then, um, in about a month.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> And uh, if you have any problems, you know, give me a call.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Any problem with the meds, it sounds like you're okay with them, so that's good.  And, um -</p>
+
+<p><b>PT:</b> Thank you.</p>
+
+<p><b>DR:</b> Take care.</p>
+
+<p><b>PT:</b> You too.</p>
+
+<p><b>DR:</b> [INAUDIBLE].</p>
+
+<p><b>PT:</b> It was a pleasure meeting you.</p>
+
+<p><b>DR:</b> Same here, good meeting you.</p>
+
+<p><b>PT:</b> Thank you.</p>
+
+<p><b>DR:</b> Take care.</p>
+
+<p>Research to Listen, Understand and Analyze Physician-Patient Interactions</p>
+
+<p>END TRANSCRIPT</p>

@@ -1,0 +1,954 @@
+<p>TRANSCRIPT OF AUDIO FILE:</p>
+
+<p>______________________________________________________________________________</p>
+
+
+<table>
+<tr>
+<td>
+<b>Interaction Type:</b> Bipolar Disorder<br><br>
+<b><i>Patient Information:</i></b><br><br>
+<b>Gender:</b> Female<br><br>
+<b>Age:</b> 35-54 years<br><br>
+<b>Race:</b> Caucasian/White<br><br>
+<b>Current Treatments (Type):</b> Abilify (New)<br>
+Cymbalta (Continuing)<br>
+Lithium (Continuing)<br>
+Prozac (Continuing)
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+<b>Recording ID:</b> 23669<br><br>
+<b><i>Physician Information:</i></b><br><br>
+<b>Specialty:</b> Psychiatrist<br><br>
+<b>Gender:</b> Female<br><br>
+<b>Years in Practice:</b> 11-20 years<br><br><br><br><br><br>
+</td>
+</tr>
+</table>
+
+
+<br><br>
+
+<p>BEGIN TRANSCRIPT:</p>
+
+<p><b>DR:</b> I can't believe it's the [DATE].  There you go.  I filled in that part for you, if you want, just with the name and stuff.</p>
+
+<p><b>PT:</b> Is this for the -</p>
+
+<p><b>DR:</b> This is the participation confirmation.  In other words, that you are [PATIENT NAME].  And this one is also, um, the health insurance, uh, HIPAA Act, which says that it's kept confidential.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Yeah, because I thought you said you had one about different studies.</p>
+
+<p><b>DR:</b> Oh.  Right here it would say:  By checking this box, I authorize Verilogue to contact me with additional questions.  If I chose to participate in any follow up meetings, they will pay me a fee in connection with its internal policies.  So if you do, if you might be interested in participating in the future for compensation, you can give your contact information right there.</p>
+
+<p><b>PT:</b> What do you think?</p>
+
+<p><b>DR:</b> It could be worth a try.  I mean, it might really help people understand, you know, people who are grappling with depression, chronic pain, chronic illness.</p>
+
+<p><b>PT:</b> Okay.  So you -</p>
+
+<p><b>DR:</b> Because I know, yeah, it's completely voluntary.  It's up to you.</p>
+
+<p><b>PT:</b> All right.  I have to -</p>
+
+<p><b>DR:</b> You prefer e-mail, telephone or, um, direct mail, through the mail, you could.</p>
+
+<p><b>PT:</b> I guess I'll just, yeah, I'm not good at that.  This is going to be a different address than you have.</p>
+
+<p><b>DR:</b> Oh, okay.  I should update that, too.  And you'll tell [NAME OTHER] right?</p>
+
+<p><b>PT:</b> Yeah.  You know, because I should of put my, I go, I'm at [DEIDENTIFIED] -</p>
+
+<p><b>DR:</b> Oh, okay.</p>
+
+<p><b>PT:</b> In your records.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> Okay.  That's my mother's house.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> Okay.  And that's why everything is at [DEIDENTIFIED].</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I used to put, was writing down my apartment number.</p>
+
+<p><b>DR:</b> Okay.  Yeah, wherever you want the mail to go.</p>
+
+<p><b>PT:</b> Okay.  So -</p>
+
+<p><b>DR:</b> That's how they'll contact you.</p>
+
+<p><b>PT:</b> But you, you don't need to change yours.</p>
+
+<p><b>DR:</b> Oh, okay, that's fine.</p>
+
+<p><b>PT:</b> Okay?</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> I think it might, I, I can't even write today.</p>
+
+<p><b>DR:</b> Why, you're actually doing great.</p>
+
+<p><b>PT:</b> Hm?</p>
+
+<p><b>DR:</b> You're doing great, [DEIDENTIFIED].</p>
+
+<p><b>PT:</b> Yes.</p>
+
+<p><b>DR:</b> Yep.  You have great handwriting.</p>
+
+<p><b>PT:</b> I, I'm bad at printing.  Usually my cursive is better.</p>
+
+<p><b>DR:</b> You, I think it's very nice.</p>
+
+<p><b>PT:</b> But for some reason, I don't know, I think it's medication.</p>
+
+<p><b>DR:</b> Yeah.  What do you think might be aggravating that, in terms of the medication?  Have you noticed anything that makes the tremor more or less?</p>
+
+<p><b>PT:</b> I, I don't know which -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> Which medication.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> I -</p>
+
+<p><b>DR:</b> I think the lithium is the one it's most commonly associated with.  Have you noticed that as well?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Yeah.  Because I remember when I was in the hospital one time, and they had put me on lithium, I was only supposed to get 900, they upped it to 900 mg -</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> At that time.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> And somebody read the chart wrong, and gave me instead of 900 that day, I got 100, I got 1200 -</p>
+
+<p><b>DR:</b> Yikes.</p>
+
+<p><b>PT:</b> Uh, yeah.</p>
+
+<p><b>DR:</b> An extra, woof.</p>
+
+<p><b>PT:</b> I was walking like I was drunk.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> I couldn't write.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> Yeah.  And they wouldn't, and I begged for a blood, blood test.</p>
+
+<p><b>DR:</b> Hm.</p>
+
+<p><b>PT:</b> You know, to draw my blood.  I knew -</p>
+
+<p><b>DR:</b> Well, sure.</p>
+
+<p><b>PT:</b> Because I knew it was, I knew they screwed up.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> They gave me too much medicine.</p>
+
+<p><b>DR:</b> Yikes.  Was that at [DEIDENTIFIED] that time -</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> When we worked together?  Wow -</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> On [PHYSICIAN NAME OTHER] or it was -</p>
+
+<p><b>PT:</b> No, no, not with -</p>
+
+<p><b>DR:</b> Not with him.  Okay, okay.  Yeah, because that was, that shouldn't happen.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> You're right about that.</p>
+
+<p><b>PT:</b> All right.  I can take this -</p>
+
+<p><b>DR:</b> Yep.</p>
+
+<p><b>PT:</b> And read it.</p>
+
+<p><b>DR:</b> You can take the brochure if you like.  Sounds good.</p>
+
+<p><b>PT:</b> Yeah, so I can read what I -</p>
+
+<p><b>DR:</b> Yeah.  And I think they have a website, and, yeah, see if there's some interesting information on there.</p>
+
+<p><b>PT:</b> Okay.  Uh, you said you ha, is that all of it?</p>
+
+<p><b>DR:</b> Yeah.  I've got Cymbalta, yeah, and, uh, and also the Deplin supplements that we talked about quite a bit.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Yeah, you do have quite a bit.</p>
+
+<p><b>DR:</b> I stockpiled for you.</p>
+
+<p><b>PT:</b> Okay.  I ran into a, oh, that's pretty.</p>
+
+<p><b>DR:</b> Oh, thank you.</p>
+
+<p><b>PT:</b> Okay.  I ran into a problem.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> Uh, I was very, very depressed.  And, um, I was taking 40 mg of Prozac.</p>
+
+<p><b>DR:</b> Right.</p>
+
+<p><b>PT:</b> I had 40 mg tabs.</p>
+
+<p><b>DR:</b> Oh, okay.</p>
+
+<p><b>PT:</b> Okay?</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> So I went back and I still had some 20s -</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> And some 10s.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I started taking them.</p>
+
+<p><b>DR:</b> That's fine.</p>
+
+<p><b>PT:</b> So I cut back, I feel better cut back.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> I feel better that I cut back.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> But I had a couple days that were unbelievable.</p>
+
+<p><b>DR:</b> Is that when you called [NAME OTHER], and then she told me about how you were adjusting the Cymbalta and the Prozac balance?</p>
+
+<p><b>PT:</b> No, this happened over the holidays.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> And I don't know if it had anything to do with the holidays.  I, I really don't.  I know people get -</p>
+
+<p><b>DR:</b> It's a tough time of year.  It's the shortest day of the year for one thing, on the [DATE], you know, and there's all the hoopla about the holidays.  You've had some big losses.  And I think even if it's not in the front of your mind, everybody's conscious of their losses.</p>
+
+<p><b>PT:</b> Well, I did have another loss.</p>
+
+<p><b>DR:</b> No.</p>
+
+<p><b>PT:</b> Sort of.  Well, yeah, I did.  But -</p>
+
+<p><b>DR:</b> Oh, wow.</p>
+
+<p><b>PT:</b> My son and his fiancee -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> They, well, they've, they've lived together.  They've been together for five years.</p>
+
+<p><b>DR:</b> Right.</p>
+
+<p><b>PT:</b> And, uh, she's pregnant.</p>
+
+<p><b>DR:</b> Oh, wow.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> So I was going to be a grandmom.</p>
+
+<p><b>DR:</b> Wow.  Was going to?</p>
+
+<p><b>PT:</b> Was going to.</p>
+
+<p><b>DR:</b> Oh, wow.</p>
+
+<p><b>PT:</b> She had a miscarriage.</p>
+
+<p><b>DR:</b> That's hard.  How far along was she, [PATIENT NAME]?</p>
+
+<p><b>PT:</b> She was only two months.</p>
+
+<p><b>DR:</b> It's still hard, though, you know.</p>
+
+<p><b>PT:</b> Yeah.  Because I didn't realize I wanted a grandchild -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Until they told me.  And I said to them, I said, "Well, you really should wait until about three months before you get telling everybody."</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Well, they didn't listen.</p>
+
+<p><b>DR:</b> That's a hard lesson, it really is.</p>
+
+<p><b>PT:</b> They didn't listen to me.  And since they were telling everybody, I said, well, guess what.  For me it's, you know, when do I have good news?</p>
+
+<p><b>DR:</b> Right.</p>
+
+<p><b>PT:</b> [LAUGHING].  How often do I have good news?</p>
+
+<p><b>DR:</b> Awe.  I'm sorry.  That's rough.</p>
+
+<p><b>PT:</b> So, but we just, I found, just found out recently -</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> That, uh, what it was, had to do with the chromosomes.</p>
+
+<p><b>DR:</b> Really?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Huh.</p>
+
+<p><b>PT:</b> And it was explained to me where I understood it.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> But I probably cannot explain it back.  But -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Since, since you're a doctor -</p>
+
+<p><b>DR:</b> Sure.</p>
+
+<p><b>PT:</b> Uh, something about when the sperm hit the egg, it was doomed from there.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Because of the chromosome.  Uh, the baby would have been, if the baby was born -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> He or she would have been deathly sick.</p>
+
+<p><b>DR:</b> Could have been something like a trisomy 19, or sometimes 3 copies of the chromosome are there when you really ought to have 2, and that's usually a really severe disability.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> But the baby would have spent most of it's life in the hospital.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> Which would only have been about a year.  So, I mean, it's a blessing in disguise.</p>
+
+<p><b>DR:</b> At least you know that much.  Yeah.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> When I found that out, I was, you know, I was glad to know that, because I know not only mentally, I know that if there, if your body knows if, if the baby's weak, if there's -</p>
+
+<p><b>DR:</b> Yes.</p>
+
+<p><b>PT:</b> A problem with it, that the body aborts the pregnancy itself.</p>
+
+<p><b>DR:</b> Exactly.  Exactly.</p>
+
+<p><b>PT:</b> That's what nature -</p>
+
+<p><b>DR:</b> Nature has its wisdom.</p>
+
+<p><b>PT:</b> Right.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Exactly.  That's way they call it a miscarriage.</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> And, uh, so that, that was sad.</p>
+
+<p><b>DR:</b> And in this day and age, where we have the early detection pregnancy test, that's a little bit of a blessing and a curse together.  Because in the old days when something like that happened, a woman might have thought, oh, my period was late, or you don't necessarily know.  And here there was the potential, there was excitement, but you were right, it was still very early.  And that's often a reason people do wait, because nature may still be making up its mind.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> You know, if this is something that it, um, you know, makes sense to invest a life in, and try to have that, uh, you know, potential person survive, or would it just be such a struggle, you know.  Yeah.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> That's rough, though.  Because, you know, you get used to the idea, and the excitement, and, uh -</p>
+
+<p><b>PT:</b> Yeah.  And because she had called me, [NAME OTHER], she said, "Well, the baby's, if you want to go, if you want to come, the baby's first sonogram is [DATE], " I think, or -</p>
+
+<p><b>DR:</b> Oh, yeah.</p>
+
+<p><b>PT:</b> You know.  Like, "And if you want to be in the delivery room you can."</p>
+
+<p><b>DR:</b> Oh, wow.  So she was thinking way, way ahead, you know.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Like, because her mother had already did it.  She already has a child -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> From someone else.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> He's, he's [AGE] or [AGE].</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Oh, wow.</p>
+
+<p><b>PT:</b> But [NAME OTHER], like I said, [NAME OTHER], they've been together since -</p>
+
+<p><b>DR:</b> That's nice.</p>
+
+<p><b>PT:</b> For five years so -</p>
+
+<p><b>DR:</b> So he's pretty much his dad, yeah.  Wow.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> So, um, that's why she was saying to me, like, her mother already got to do it -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> With [NAME OTHER], so.</p>
+
+<p><b>DR:</b> Wow.  I have a feeling that your time will come, probably even sooner than you might expect.  But, you know, maybe now, oh, we'll wait for the wedding, and, or whatever, you know.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> But still, are they holding up okay?  They're not too devastated by this?</p>
+
+<p><b>PT:</b> Uh, they're, yeah.  They're -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> They're holding up.  They're holding up much better now.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Since they know what happened.</p>
+
+<p><b>DR:</b> Exactly.  Exactly.  And in way, you know, knowing this, they might then chose in the future to have testing prenatally just to be prepared for -</p>
+
+<p><b>PT:</b> Yes.</p>
+
+<p><b>DR:</b> You know.  And sometimes people will know the one trisomy that can sometimes survive very, very well, of course, is Down Syndrome.  So sometimes people who know they would be keeping a pregnancy anyway, at least if they found out there's Down Syndrome, they can start to make plans and start saving and whatever.</p>
+
+<p><b>PT:</b> Yes.</p>
+
+<p><b>DR:</b> So, you know, people get those tests for all kinds of reasons.  It doesn't necessarily mean one particular reason, you know.</p>
+
+<p><b>PT:</b> Yeah.  Well, I feel they're going to do that.  But this -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> This baby, well, this pregnancy was a surprise -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> For, you know -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> For them.</p>
+
+<p><b>DR:</b> Yeah.  Yeah.</p>
+
+<p><b>PT:</b> So, uh, so now I think they're going to, kind of, do it and, and more or less try to do a planned one.</p>
+
+<p><b>DR:</b> Exactly.  Exactly.</p>
+
+<p><b>PT:</b> So.</p>
+
+<p><b>DR:</b> Wow.  Wow, that was a big surprise at the end of '08, wasn't it?  It think everybody's ready to start a new year, you know.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.  Fresh start.  You know, have the things in control that you can.  Yeah.</p>
+
+<p><b>PT:</b> But like I said, there was a, like, a couple days that I had, were, I mean, they were like torture.</p>
+
+<p><b>DR:</b> How did you pull through it?  What got you through?</p>
+
+<p><b>PT:</b> God.  God.</p>
+
+<p><b>DR:</b> Yeah.  Prayer, and weathering it out and, good for you.  Yeah, you've got to call on all your resources at a time like that.</p>
+
+<p><b>PT:</b> Yeah.  It was, it was the holiday, and then it went, it was the weekend.</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> So there wasn't, like, I couldn't call [NAME OTHER].</p>
+
+<p><b>DR:</b> Yeah.  It's a long stretch.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> That wasn't such great timing for a lot of people, too.  It's a big disruption in, you know, sort of the day to day life.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> And, you know, I don't know, I guess it's good.  I don't know, I really don't know sometimes.  I know I, like, it was like I can't live like this.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> I know something, something's got to go or, something's got to change.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> But, uh, I mean as far as, uh, a, all right.  Okay.  I see a commercial for I think Abilify.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> And it said about, uh, two out of three people with depression still suffer from symptoms.</p>
+
+<p><b>DR:</b> Definitely.</p>
+
+<p><b>PT:</b> Okay.  And I'm definitely one of those, you know.  Because even though I take my meds every day -</p>
+
+<p><b>DR:</b> Yes.</p>
+
+<p><b>PT:</b> It's, uh -</p>
+
+<p><b>DR:</b> And it's robust doses, too, the Cymbalta at 60, um, the Prozac at either 30, 40, um, there's also lithium, which can have some antidepressant effect, as well as the mood stabilizing, Desyrel and the Deplin.  So it might not be a bad idea to try the Abilify as a supplement.  It is approved now by the FDA for, you know, in, in smaller doses particularly trying to boost the effect of antidepressants.  And I could give you some samples to try.  You know, you can kind of get a sense, is this going in the right direction for me?  You know, so a few things that people tend to like about Abilify are, is that, um, usually it doesn't make them too tired during the day.  They usually take it in the morning, and they might even feel a little boost in energy.  So that can be a plus.  I'll give you the smallest dose, it's 2 mg.  You can even break it in half if you want to, to get started.  Um, but sometimes within a few days, couple weeks, people do notice a difference.  And it, it could be compatible with the other things that you're taking, too.  So it's not a bad thought at all.  And I have some good, uh, information about it.  And, yeah, I could give you some samples.  And if it turns out we're on the right track with that, you know, you can work with adjusting the dose.  I don't think you'll have any trouble getting it on your insurance either.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Yeah.  Because you've tried a lot of other kinds of things, too, you know, along the way.</p>
+
+<p><b>PT:</b> Oh, yeah.</p>
+
+<p><b>DR:</b> The antidepressants.  And, and they really haven't been the answer.  And the Abilify category is not really one we've looked at much until now.  So I think that's very reasonable.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Because like I said, something, uh, I'm grateful that I, that I'm not as sick as other people, I am grateful for that.  But, like, my life, uh, is not a life.</p>
+
+<p><b>DR:</b> You deserve more relief.  You deserve more relief than you've been getting.  And a lot of times with bipolar, the mood stabilization is not always the biggest piece, often it's the depression that really gets people, so.</p>
+
+<p><b>PT:</b> Right.</p>
+
+<p><b>DR:</b> And I'm certainly hearing that, you know, with your situation.</p>
+
+<p><b>PT:</b> Yeah.  Yeah.  I mean, um, when I went to sleep at night, those couple of nights -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> You know, I took my Desyrel, and I would fall asleep, and then I was waking up where I was punching the pillow.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> I mean, pounding my leg up and down on the bed.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> Like, I was, like, fired up, like -</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> Not that I felt like I wanted to hurt somebody, but it was like whatever's going on, I was ju, I was, like, flipping out.</p>
+
+<p><b>DR:</b> Wow.  Do you remember if you were having nightmares at that time?  Can you remember anything about what you might have been dreaming?  Wow.</p>
+
+<p><b>PT:</b> No.  I can't say.  Because nightmares I usually remember.</p>
+
+<p><b>DR:</b> Yeah.  Because this just sounds like a lot of pent up, you know, frustration, or anxiety, or energy, anger.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.  You may, I think you're having some good thoughts about some additional mood stabilization.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> And, uh, financially, I got an increase in our SSI, as you know, uh, my rent went up -</p>
+
+<p><b>DR:</b> Oh, no.</p>
+
+<p><b>PT:</b> Thirty two dollars.  Plus, well, we're going to have to pay, if we use an excess of $35.00, anything over $35.00 a month in water, we have to pay for.</p>
+
+<p><b>DR:</b> Oh my goodness.</p>
+
+<p><b>PT:</b> And that's going come at, as a three month period.</p>
+
+<p><b>DR:</b> Wow.  That's the first I've ever heard of that.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Wow.  That's almost like rationing kind of, water rationing or something.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Wow.  Hm.</p>
+
+<p><b>PT:</b> So, and even food stamps -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Did you hear about that?</p>
+
+<p><b>DR:</b> No.</p>
+
+<p><b>PT:</b> Oh, I think I brought you the letter.  I hope this is the right one.  Here you go.</p>
+
+<p><b>DR:</b> Your food stamp benefits will change based on the 5.8%, for goodness sake, cost of living adjustment you will receive in your social security, and/or your SSI in January 2009.  Which is ridiculous, because it's already immediately spoken for by increases and everything else, right?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Oh, wow.</p>
+
+<p><b>PT:</b> I mean, I'm -</p>
+
+<p><b>DR:</b> That's tough.</p>
+
+<p><b>PT:</b> I was only getting, I mean -</p>
+
+<p><b>DR:</b> Oh, so you're reduced from $55.00 a month to $38.00?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yikes.  Wow, these are some of those cuts they're talking about, I bet, you know.  Oh, [PATIENT NAME], are you going to be able to get by?</p>
+
+<p><b>PT:</b> Uh -</p>
+
+<p><b>DR:</b> You'll find a way.  I'll keep getting you samples as long as I can get you samples, and save you copays, you know.  Definitely.</p>
+
+<p><b>PT:</b> Yeah.  I don't think I, you know what, I don't think I pay for those.  Uh, the Deplin I don't.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> The Deplin I pay $3.00.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> But I don't think I pay for the Cymbalta.</p>
+
+<p><b>DR:</b> Okay.  Even though it's a brand name, that's good.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> But I think, I don't think I, uh, as far as, like, mental -</p>
+
+<p><b>DR:</b> Good.</p>
+
+<p><b>PT:</b> Uh, medication, [INAUDIBLE].</p>
+
+<p><b>DR:</b> Good.  Well, that's good if that's covered.  Excellent.  Yeah, because some plans say only one antidepressant is covered, and I end up having to give the person the other one, you know, if it's samples.  So that's good.  That's good if yours does.  But even so, you know, with the Abilify, we can work samples, figure out what's the right dose, and then I can write the prescription for you.</p>
+
+<p><b>PT:</b> Yeah, if it works.</p>
+
+<p><b>DR:</b> Yeah, exactly.</p>
+
+<p><b>PT:</b> Because I know it has that, doesn't that have a lot of side effects?</p>
+
+<p><b>DR:</b> It depends.  I mean they certainly say them all on TV.  Because for, you know, re, uh, uh, legal reasons and such.  Um, but especially if you start at the lower doses, and go slowly, a person might not.  I mean they might say they feel more like themselves.  Um, but things that people do is they do experience side effects.  One thing I do sometimes hear about is that increased energy level, you know, that people might find a little bit of activation, or maybe they might feel a little bit wired, so that would be a less positive, uh, outlook on the increased energy.  Um, but usually the side effects are pretty mild.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> Sometimes a little bit of nausea in the beginning, sometimes a little bit of lightheaded, um, sometimes an increased appetite, but not always.  Um, and I'll give you some information that has a lot more detail about it, too.</p>
+
+<p><b>PT:</b> Okay.</p>
+
+<p><b>DR:</b> And especially starting low, you know, going slowly with the dosing, you know, it really might give that boost.  So, yeah, in fact, let me get some information together for you about it.</p>
+
+<p><b>PT:</b> All right.  And -</p>
+
+<p><b>DR:</b> And a couple of the samples.</p>
+
+<p><b>PT:</b> The other thing, before you -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> Is, uh, and this could have had bearing on the depression.  I went to my oncologist.</p>
+
+<p><b>DR:</b> Oh, yeah.</p>
+
+<p><b>PT:</b> Yeah.  And my blood level, my hemoglobin was, was at 11 point something before.</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> Then in December, I think it was like [DATE] -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> You know, uh, it dropped to 9.6.</p>
+
+<p><b>DR:</b> Huh.</p>
+
+<p><b>PT:</b> So he wanted me to have my CT scan done early.</p>
+
+<p><b>DR:</b> Ah.</p>
+
+<p><b>PT:</b> He says, "I don't want you to worry."</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> But, so I had it the first week of January.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> That's when he wanted me to have it.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> He said the holidays are right here, don't even bother.</p>
+
+<p><b>DR:</b> Exactly.  Exactly.</p>
+
+<p><b>PT:</b> You know, don't worry about it, but I just want to, you to have the CT scan early, earlier than, uh, so, anyway, everything came back good.</p>
+
+<p><b>DR:</b> Oh good.</p>
+
+<p><b>PT:</b> Yes.</p>
+
+<p><b>DR:</b> That's nice to know.  That, of course, was a cause of stress until you know.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> So, uh, now with that out of the way, uh, I wanted, uh, oh, [PHYSICIAN NAME OTHER] wanted me to ask you.</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> Now, pending my, I have to get, I have to get an MRI.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> Okay.  I put that on the back burner when I found out about the CT scan.</p>
+
+<p><b>DR:</b> Sure.</p>
+
+<p><b>PT:</b> Okay.  Because he's doing my pain management.  He, depending on what happens with the MRI -</p>
+
+<p><b>DR:</b> Yes.</p>
+
+<p><b>PT:</b> He wants to know, what do you think of cutting back on the pain meds slow, like slowly, do you think that would be helpful?</p>
+
+<p><b>DR:</b> How do you feel?</p>
+
+<p><b>PT:</b> I don't know.</p>
+
+<p><b>DR:</b> Yeah.  It could be worth a try.  I mean, especially if you feel as though if they slow you down in anyway, either with your thinking or your movements.  Um, since most of the medicines that you're taking, except for the lithium, are processed by your liver, it is possible, you know, that they're not being metabolized in the most efficient way, so you might have an increased sensitivity to side effects from some of them.  Now, usually, um, we can adjust the doses to reflect that.  Um, I think you could really, you know, get through the test, you know, see where things stand, and maybe look at the big picture at that point.  If the Abilify's kicking in, sometimes that goes through pathways that have some relief from pain, so it might be possible.</p>
+
+<p><b>PT:</b> Okay.  Like I said, pending what the MRI shows -</p>
+
+<p><b>DR:</b> Right, right.</p>
+
+<p><b>PT:</b> I, I hope, you know, I make, I make plans in my mind that don't get followed through, if I, and I'm, I really mean it when I say it.</p>
+
+<p><b>DR:</b> Oh, sure.</p>
+
+<p><b>PT:</b> Like, I, I, I intend to get the MRI.</p>
+
+<p><b>DR:</b> That's excellent.</p>
+
+<p><b>PT:</b> Yeah, because I'm in too much pain.</p>
+
+<p><b>DR:</b> Yes.  You've been in pain for a long time.</p>
+
+<p><b>PT:</b> Yeah.  And I knew, I, I know I have problems with my disc.</p>
+
+<p><b>DR:</b> Yes.</p>
+
+<p><b>PT:</b> I know I have bulging disc, and degenerating disc.</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> That much I remember.  Um, but, oh, and then I would go to physical therapy.</p>
+
+<p><b>DR:</b> Okay.</p>
+
+<p><b>PT:</b> Aquatic therapy.</p>
+
+<p><b>DR:</b> Oh, great.  I've heard good things about that.</p>
+
+<p><b>PT:</b> Yeah.  Well, we were trying to do it when I was in pain management at the [DEIDENTIFIED] -</p>
+
+<p><b>DR:</b> Oh yeah, yeah.</p>
+
+<p><b>PT:</b> And we couldn't get anybody with, that would cover it, any place that would take my insurance.</p>
+
+<p><b>DR:</b> That's a shame.</p>
+
+<p><b>PT:</b> So, uh, he believes NovaCare, uh, they have a place at [DEIDENTIFIED] -</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> That they have aquatic therapy there.</p>
+
+<p><b>DR:</b> That would be fantastic.</p>
+
+<p><b>PT:</b> Yeah.  And they actually have a van.</p>
+
+<p><b>DR:</b> Excellent.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> That would be really nice.</p>
+
+<p><b>PT:</b> So, but it's just the point of me getting motivated.  I s, I ge, I said to him, it's, like, just get me out the door.</p>
+
+<p><b>DR:</b> Right.  Right.  That's always the hurdle, isn't it?</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Good.  You know, I think you have some good thoughts, especially about approaches to medication, and this just may be the thing that gives that boost that, that could be really helpful.</p>
+
+<p><b>PT:</b> Yeah, I sure hope so.</p>
+
+<p><b>DR:</b> Yeah, it's worth a try, absolutely.</p>
+
+<p><b>PT:</b> Because, well, there's a lot I, well, as far as tests and everything, I'm going to have them all done this year.</p>
+
+<p><b>DR:</b> Exactly.</p>
+
+<p><b>PT:</b> Um, before I turn [AGE].</p>
+
+<p><b>DR:</b> Ah.  Is there anything magic about the number [AGE]?  Does your coverage change, or are you just, uh, you want to know what the -</p>
+
+<p><b>PT:</b> Uh, no, no.</p>
+
+<p><b>DR:</b> What the story is so [INAUDIBLE]?</p>
+
+<p><b>PT:</b> Yeah.  I just want to make sure I have all my regular tests done that should be done -</p>
+
+<p><b>DR:</b> Um-hum.</p>
+
+<p><b>PT:</b> That I have missed.  Like my mammogram.  I haven't had one in, well, this will be the, I'm starting the third year.</p>
+
+<p><b>DR:</b> Okay, you're right.</p>
+
+<p><b>PT:</b> I'm supposed to get them in January.</p>
+
+<p><b>DR:</b> It's time to get that done.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Good thinking.</p>
+
+<p><b>PT:</b> But I did have a ultrasound done, like, two years ago.</p>
+
+<p><b>DR:</b> Um-hum, good.  So that's -</p>
+
+<p><b>PT:</b> So it's not like I -</p>
+
+<p><b>DR:</b> Yeah, if you had a, an ultrasound of, um, your breasts done two years ago, then that counts.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> Yeah.  Because that would be the next step up anyway -</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> So.  Okay, well, good.  You're right, you, you know, you're good to get back on the track with that as well.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> So all right.  Let me get some of those samples together for you and some of the information.</p>
+
+<p><b>PT:</b> Yeah.</p>
+
+<p><b>DR:</b> And then I'll take you back to see [NAME OTHER].  And let's you and I meet again maybe in a month or two; see how it's going with this, and -</p>
+
+<p><b>PT:</b> Yeah, 6 weeks.</p>
+
+<p><b>DR:</b> Just make sure that we're on top of it, yeah.</p>
+
+<p><b>PT:</b> Yeah, because I haven't seen you.</p>
+
+<p><b>DR:</b> Yeah, it's been a while.</p>
+
+<p><b>PT:</b> Yeah.  Well, I -</p>
+
+<p><b>DR:</b> Since November.</p>
+
+<p><b>PT:</b> No, I didn't come in November, I was sick.</p>
+
+<p><b>DR:</b> Oh, that's right.  You, that's right, and I called them in.  That's what it was, you're right.  We rescheduled from there.  You're right.</p>
+
+<p><b>PT:</b> And I was just in -</p>
+
+<p><b>DR:</b> Because I think it was October, [DATE].</p>
+
+<p><b>PT:</b> [DATE]?</p>
+
+<p><b>DR:</b> Yeah.</p>
+
+<p><b>PT:</b> I was going to say September.</p>
+
+<p><b>DR:</b> Wow.</p>
+
+<p><b>PT:</b> But, yeah.</p>
+
+<p><b>DR:</b> I guess.</p>
+
+<p><b>PT:</b> That long.</p>
+
+<p><b>DR:</b> Yeah.  All right, so, I'll take that.  I'll shut this off, because you're just going to be rummaging around in cabinets and stuff.</p>
+
+<p>Research to Listen, Understand and Analyze Physician-Patient Interactions</p>
+
+<p>END TRANSCRIPT</p>
