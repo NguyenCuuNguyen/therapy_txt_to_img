@@ -3,3 +3,8 @@ data/
 experiments/
 src/logs/
 misc/
+*.sh
+*.zip
+*.tar
+*.pt
+*.h5
