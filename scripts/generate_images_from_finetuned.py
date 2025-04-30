@@ -110,25 +110,30 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         # --- Load Base Models ---
         if model_name == "sdxl":
             base_model_id = base_model_ids["sdxl"]
-            logger.info("Loading SDXL VAE in FP32...")
-            vae = AutoencoderKL.from_pretrained(base_model_id, subfolder="vae", torch_dtype=torch.float32)
-            logger.info("Loading SDXL Pipeline components...")
-            # Load the base pipeline *without* LoRA first
+            logger.info(f"Loading SDXL Pipeline components in {target_dtype}...")
+            """ Load the entire pipeline, including VAE, in the target dtype (fp16)
+            # This ensures VAE input/output match during decode"""
             pipeline = StableDiffusionXLPipeline.from_pretrained(
-                base_model_id, vae=vae, torch_dtype=target_dtype,
-                variant="fp16", use_safetensors=True,
+                base_model_id,
+                torch_dtype=target_dtype, # Load ALL components in target_dtype
+                variant="fp16", # Use fp16 variant if available
+                use_safetensors=True,
+                # VAE will be loaded in target_dtype by the pipeline
             )
+            if hasattr(pipeline, 'vae'):
+                 logger.info(f"Pipeline VAE loaded with dtype: {pipeline.vae.dtype}") # Should be target_dtype
+                 pipeline.vae.eval() # Ensure eval mode
+            else:
+                 logger.warning("Pipeline loaded without a VAE attribute.")
             logger.info("Loaded SDXL base pipeline.")
 
             # --- Load SDXL LoRA using pipeline method ---
             logger.info(f"Loading SDXL LoRA weights from: {lora_checkpoint_dir}")
             # Check if the main weight file exists in the checkpoint directory itself
-            # (diffusers >= 0.20.0 standard) or fallback to checking subfolders
             main_safe_path = os.path.join(lora_checkpoint_dir, lora_weight_name)
             main_bin_path = os.path.join(lora_checkpoint_dir, lora_weight_name_bin)
 
             if os.path.exists(main_safe_path) or os.path.exists(main_bin_path):
-                 # Load directly from the checkpoint directory
                  weight_to_load = lora_weight_name if os.path.exists(main_safe_path) else lora_weight_name_bin
                  logger.info(f"Found main LoRA file '{weight_to_load}', loading from base directory: {lora_checkpoint_dir}")
                  pipeline.load_lora_weights(lora_checkpoint_dir, weight_name=weight_to_load)
@@ -140,7 +145,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                  te1_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_lora")
                  te2_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_2_lora")
 
-                 # Helper to get weight name from subfolder
                  def get_lora_weight_name_sub(path):
                      safetensors_path = os.path.join(path, lora_weight_name)
                      bin_path = os.path.join(path, lora_weight_name_bin)
@@ -193,7 +197,7 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
             try:
                 logger.info(f"Loading Kandinsky VAE (MoVQ) in FP32 from {decoder_id}/movq")
                 vae = VQModel.from_pretrained(decoder_id, subfolder="movq", torch_dtype=torch.float32)
-                pipeline.movq = vae
+                pipeline.movq = vae # Assign the fp32 VAE
                 logger.info("Loaded and assigned Kandinsky VQ VAE in FP32.")
             except Exception as e: logger.warning(f"Could not load separate VQ VAE for Kandinsky: {e}")
             logger.info("Loaded Kandinsky base pipelines.")
@@ -205,15 +209,14 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
 
             # Helper for load_adapter
             def _load_adapter_safely(component, adapter_path):
-                if not component or not hasattr(component, 'load_adapter'): logger.warning(...); return False
-                if not os.path.isdir(adapter_path): logger.warning(...); return False
-                lora_weight_name_safe = "adapter_model.safetensors"
-                lora_weight_name_bin = "adapter_model.bin"
+                if not component or not hasattr(component, 'load_adapter'): logger.warning(f"Component {component.__class__.__name__ if component else 'None'} does not support load_adapter."); return False
+                if not os.path.isdir(adapter_path): logger.warning(f"Adapter path not found: {adapter_path}"); return False
+                lora_weight_name_safe = "adapter_model.safetensors"; lora_weight_name_bin = "adapter_model.bin"
                 if not (os.path.exists(os.path.join(adapter_path, lora_weight_name_safe)) or os.path.exists(os.path.join(adapter_path, lora_weight_name_bin))):
                     logger.warning(f"No adapter weight file found in {adapter_path}"); return False
                 try:
                     logger.info(f"Loading adapter from {adapter_path} into {component.__class__.__name__}")
-                    component.load_adapter(adapter_path, adapter_name="default") # Use default adapter name
+                    component.load_adapter(adapter_path) # Finds weights automatically
                     logger.info(f"Successfully loaded adapter into {component.__class__.__name__}")
                     return True
                 except Exception as e: logger.error(f"Failed to load adapter from {adapter_path}: {e}"); return False
