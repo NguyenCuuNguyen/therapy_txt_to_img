@@ -136,7 +136,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
     logger.info(f"Loading base model components for {model_name}...")
     pipeline = None
     prior_pipeline = None
-    # Define the expected LoRA weight filename (prioritize safetensors)
     lora_weight_name = "adapter_model.safetensors"
     lora_weight_name_bin = "adapter_model.bin" # Fallback
 
@@ -151,7 +150,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                 base_model_id, vae=vae, torch_dtype=target_dtype,
                 variant="fp16", use_safetensors=True,
             )
-            # Assign text encoders explicitly for LoRA loading
             pipeline.text_encoder = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder", torch_dtype=target_dtype, variant="fp16")
             pipeline.text_encoder_2 = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder_2", torch_dtype=target_dtype, variant="fp16")
 
@@ -182,42 +180,47 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         te1_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_lora")
         te2_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_2_lora")
 
-        # Helper function to try loading safetensors then bin
-        """explicitly tell load_lora_weights the correct filename to look for within the subfolders."""
-        def _load_lora_weights_safely(pipe_component, subfolder_path, **kwargs):
-            try:
-                # Try loading safetensors first
-                logger.debug(f"Attempting to load LoRA from {subfolder_path} using {lora_weight_name}")
-                pipe_component.load_lora_weights(lora_checkpoint_dir, subfolder=os.path.basename(subfolder_path), weight_name=lora_weight_name, **kwargs)
-                logger.info(f"Successfully loaded LoRA from {subfolder_path} ({lora_weight_name})")
-            except OSError as e:
-                logger.warning(f"Could not find {lora_weight_name} in {subfolder_path}: {e}. Trying {lora_weight_name_bin}...")
-                try:
-                    # Fallback to bin
-                    pipe_component.load_lora_weights(lora_checkpoint_dir, subfolder=os.path.basename(subfolder_path), weight_name=lora_weight_name_bin, **kwargs)
-                    logger.info(f"Successfully loaded LoRA from {subfolder_path} ({lora_weight_name_bin})")
-                except OSError as e_bin:
-                    logger.error(f"Could not find {lora_weight_name_bin} either in {subfolder_path}: {e_bin}. LoRA loading failed for this component.")
-                except Exception as e_other:
-                     logger.error(f"Error loading LoRA ({lora_weight_name_bin}) from {subfolder_path}: {e_other}")
-            except Exception as e_other:
-                 logger.error(f"Error loading LoRA ({lora_weight_name}) from {subfolder_path}: {e_other}")
+        # Helper function to load adapter safely
+        def _load_adapter_safely(component, adapter_path):
+            adapter_file_safetensors = os.path.join(adapter_path, lora_weight_name)
+            adapter_file_bin = os.path.join(adapter_path, lora_weight_name_bin)
+            weight_name_to_load = None
 
+            if os.path.exists(adapter_file_safetensors):
+                weight_name_to_load = lora_weight_name
+            elif os.path.exists(adapter_file_bin):
+                weight_name_to_load = lora_weight_name_bin
+
+            if weight_name_to_load:
+                try:
+                    logger.info(f"Loading adapter from {adapter_path} using {weight_name_to_load}")
+                    component.load_adapter(adapter_path, weight_name=weight_name_to_load)
+                    logger.info(f"Successfully loaded adapter into {component.__class__.__name__}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to load adapter from {adapter_path} with {weight_name_to_load}: {e}")
+                    return False
+            else:
+                logger.error(f"No LoRA weight file ({lora_weight_name} or {lora_weight_name_bin}) found in {adapter_path}")
+                return False
 
         # Load UNet LoRA
         if os.path.exists(unet_lora_path) and hasattr(pipeline, 'unet'):
-            _load_lora_weights_safely(pipeline, "unet_lora") # Pass pipeline, subfolder name
+            if model_name == "kandinsky":
+                _load_adapter_safely(pipeline.unet, unet_lora_path) # Use load_adapter
+            else: # Assume others use load_lora_weights
+                pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="unet_lora") # Keep original for SDXL
 
         # Load Text Encoder LoRA(s)
         if model_name == "sdxl":
             if os.path.exists(te1_lora_path) and hasattr(pipeline, 'text_encoder'):
-                _load_lora_weights_safely(pipeline, "text_encoder_lora", text_encoder=pipeline.text_encoder)
+                pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_lora", text_encoder=pipeline.text_encoder)
             if os.path.exists(te2_lora_path) and hasattr(pipeline, 'text_encoder_2'):
-                 _load_lora_weights_safely(pipeline, "text_encoder_2_lora", text_encoder=pipeline.text_encoder_2)
+                 pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_2_lora", text_encoder=pipeline.text_encoder_2)
         elif model_name == "kandinsky":
-            # Load into the prior pipeline's text encoder
+            # Load into the prior pipeline's text encoder using load_adapter
             if os.path.exists(te1_lora_path) and prior_pipeline and hasattr(prior_pipeline, 'text_encoder'):
-                 _load_lora_weights_safely(prior_pipeline, "text_encoder_lora") # Pass prior_pipeline
+                 _load_adapter_safely(prior_pipeline.text_encoder, te1_lora_path)
 
         # Move pipelines to device
         if pipeline: pipeline.to(device)
@@ -228,7 +231,8 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
 
     except Exception as e:
         logger.error(f"Failed during model or LoRA loading for {model_name} from {lora_checkpoint_dir}: {e}\n{traceback.format_exc()}")
-        return None, None # Indicate failure
+        return None, None
+    
 
 def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, output_base_dir, checkpoint_label, sample_ids, prompt_variations):
     """
@@ -258,14 +262,28 @@ def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, ou
     img_size = 1024 if model_name == "sdxl" else 512
     device = decoder_pipeline.device # Get device from the pipeline
 
+    # --- DEBUGGING: Print sample IDs and their type ---
+    if sample_ids:
+        sample_id_list = list(sample_ids)
+        logger.debug(f"Sample IDs to generate (first 5): {sample_id_list[:5]}")
+        logger.debug(f"Type of first sample ID: {type(sample_id_list[0])}")
+    else:
+        logger.warning("Sample ID list is empty!")
+    # --- END DEBUGGING ---
+
     prompts_processed_count = 0
     for index, row in prompts_df.iterrows():
-        prompt_id = str(row.get('id', f'prompt_{index}'))
+        prompt_id = str(row.get('file', f'prompt_{index}'))
         if prompt_id not in sample_ids: continue
 
+        # --- DEBUGGING: Print current prompt ID and type being checked ---
+        logger.debug(f"Checking prompt ID: '{prompt_id}' (Type: {type(prompt_id)}) against sample_ids set.")
+        # --- END DEBUGGING ---
+
+        # --- If ID matches, proceed ---
         prompts_processed_count += 1
         prompt_details = row.get('prompt_details', '')
-        logger.info(f"Processing Prompt ID: {prompt_id}")
+        logger.info(f"Processing Prompt ID: {prompt_id} (Row {index})") # Log row index too
 
         for variation_name, prompt_template in prompt_variations.items():
             logger.info(f"  Generating for variation: {variation_name}")
