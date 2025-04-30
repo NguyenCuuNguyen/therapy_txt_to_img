@@ -50,3 +50,8 @@ Run ```python scripts/generate_images_from_finetuned.py``` to
 4. Load the corresponding LoRA weights onto the base model.
 5. Generate an image for each prompt using the fine-tuned model.
 6. Save the generated images with informative names.
+
+
+
+## Iterate 2: New finetune model:
+Clear hugging face cache: rm -rf ~/.cache/huggingface/hub/models--*
