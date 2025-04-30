@@ -136,11 +136,12 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
     logger.info(f"Loading base model components for {model_name}...")
     pipeline = None
     prior_pipeline = None
+    # Define the expected LoRA weight filename (prioritize safetensors)
     lora_weight_name = "adapter_model.safetensors"
     lora_weight_name_bin = "adapter_model.bin" # Fallback
 
     try:
-        # --- SDXL Loading ---
+        # --- Load Base Models ---
         if model_name == "sdxl":
             base_model_id = base_model_ids["sdxl"]
             logger.info("Loading SDXL VAE in FP32...")
@@ -150,10 +151,10 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                 base_model_id, vae=vae, torch_dtype=target_dtype,
                 variant="fp16", use_safetensors=True,
             )
+            # Assign text encoders explicitly if needed for LoRA loading by subfolder
             pipeline.text_encoder = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder", torch_dtype=target_dtype, variant="fp16")
             pipeline.text_encoder_2 = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder_2", torch_dtype=target_dtype, variant="fp16")
 
-        # --- Kandinsky Loading ---
         elif model_name == "kandinsky":
             prior_id = base_model_ids["kandinsky_prior"]
             decoder_id = base_model_ids["kandinsky_decoder"]
@@ -180,58 +181,84 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         te1_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_lora")
         te2_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_2_lora")
 
-        # Helper function to load adapter safely
-        def _load_adapter_safely(component, adapter_path):
-            adapter_file_safetensors = os.path.join(adapter_path, lora_weight_name)
-            adapter_file_bin = os.path.join(adapter_path, lora_weight_name_bin)
-            weight_name_to_load = None
-
-            if os.path.exists(adapter_file_safetensors):
-                weight_name_to_load = lora_weight_name
-            elif os.path.exists(adapter_file_bin):
-                weight_name_to_load = lora_weight_name_bin
-
-            if weight_name_to_load:
-                try:
-                    logger.info(f"Loading adapter from {adapter_path} using {weight_name_to_load}")
-                    component.load_adapter(adapter_path, weight_name=weight_name_to_load)
-                    logger.info(f"Successfully loaded adapter into {component.__class__.__name__}")
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to load adapter from {adapter_path} with {weight_name_to_load}: {e}")
-                    return False
+        # Helper to determine the weight file name
+        def get_lora_weight_name(path):
+            safetensors_path = os.path.join(path, lora_weight_name)
+            bin_path = os.path.join(path, lora_weight_name_bin)
+            if os.path.exists(safetensors_path):
+                return lora_weight_name
+            elif os.path.exists(bin_path):
+                return lora_weight_name_bin
             else:
-                logger.error(f"No LoRA weight file ({lora_weight_name} or {lora_weight_name_bin}) found in {adapter_path}")
-                return False
+                return None
 
         # Load UNet LoRA
         if os.path.exists(unet_lora_path) and hasattr(pipeline, 'unet'):
-            if model_name == "kandinsky":
-                _load_adapter_safely(pipeline.unet, unet_lora_path) # Use load_adapter
-            else: # Assume others use load_lora_weights
-                pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="unet_lora") # Keep original for SDXL
+            weight_file = get_lora_weight_name(unet_lora_path)
+            if weight_file:
+                try:
+                    logger.info(f"Loading UNet LoRA weights from {unet_lora_path} using {weight_file}...")
+                    # Use load_lora_weights for pipelines that support it (like SDXL)
+                    # For others like Kandinsky, load adapter directly into the component
+                    if hasattr(pipeline, 'load_lora_weights'):
+                         pipeline.load_lora_weights(unet_lora_path, weight_name=weight_file)
+                    elif hasattr(pipeline.unet, 'load_adapter'):
+                         pipeline.unet.load_adapter(unet_lora_path, weight_name=weight_file) # load_adapter needs path, not dir+subfolder
+                    else:
+                         logger.warning(f"Cannot load UNet LoRA for {model_name}: No suitable loading method found.")
+                    logger.info("Loaded UNet LoRA.")
+                except Exception as e:
+                    logger.error(f"Failed to load UNet LoRA from {unet_lora_path}: {e}")
+            else:
+                 logger.warning(f"No weight file found in {unet_lora_path}")
+
 
         # Load Text Encoder LoRA(s)
         if model_name == "sdxl":
             if os.path.exists(te1_lora_path) and hasattr(pipeline, 'text_encoder'):
-                pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_lora", text_encoder=pipeline.text_encoder)
+                weight_file = get_lora_weight_name(te1_lora_path)
+                if weight_file:
+                    try:
+                        logger.info(f"Loading SDXL Text Encoder 1 LoRA weights from {te1_lora_path} using {weight_file}...")
+                        pipeline.load_lora_weights(te1_lora_path, weight_name=weight_file, text_encoder=pipeline.text_encoder)
+                        logger.info("Loaded Text Encoder 1 LoRA.")
+                    except Exception as e: logger.error(f"Failed to load TE1 LoRA: {e}")
+                else: logger.warning(f"No weight file found in {te1_lora_path}")
+
             if os.path.exists(te2_lora_path) and hasattr(pipeline, 'text_encoder_2'):
-                 pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_2_lora", text_encoder=pipeline.text_encoder_2)
+                weight_file = get_lora_weight_name(te2_lora_path)
+                if weight_file:
+                    try:
+                        logger.info(f"Loading SDXL Text Encoder 2 LoRA weights from {te2_lora_path} using {weight_file}...")
+                        pipeline.load_lora_weights(te2_lora_path, weight_name=weight_file, text_encoder=pipeline.text_encoder_2)
+                        logger.info("Loaded Text Encoder 2 LoRA.")
+                    except Exception as e: logger.error(f"Failed to load TE2 LoRA: {e}")
+                else: logger.warning(f"No weight file found in {te2_lora_path}")
+
         elif model_name == "kandinsky":
             # Load into the prior pipeline's text encoder using load_adapter
-            if os.path.exists(te1_lora_path) and prior_pipeline and hasattr(prior_pipeline, 'text_encoder'):
-                 _load_adapter_safely(prior_pipeline.text_encoder, te1_lora_path)
+            if os.path.exists(te1_lora_path) and prior_pipeline and hasattr(prior_pipeline, 'text_encoder') and hasattr(prior_pipeline.text_encoder, 'load_adapter'):
+                # load_adapter doesn't need weight_name specified if using default names
+                try:
+                    logger.info(f"Loading Kandinsky Prior Text Encoder adapter from {te1_lora_path}...")
+                    prior_pipeline.text_encoder.load_adapter(te1_lora_path) # No weight_name needed
+                    logger.info("Loaded Prior Text Encoder LoRA adapter.")
+                except Exception as e:
+                    logger.error(f"Failed to load Prior Text Encoder adapter from {te1_lora_path}: {e}")
+            elif not (prior_pipeline and hasattr(prior_pipeline, 'text_encoder')):
+                 logger.warning("Prior pipeline or its text encoder not found for Kandinsky LoRA loading.")
+
 
         # Move pipelines to device
         if pipeline: pipeline.to(device)
         if prior_pipeline: prior_pipeline.to(device)
 
-        logger.info(f"Pipeline(s) with LoRA loaded successfully for {model_name}.")
+        logger.info(f"Finished loading pipeline(s) and LoRA for {model_name}.")
         return pipeline, prior_pipeline
 
     except Exception as e:
         logger.error(f"Failed during model or LoRA loading for {model_name} from {lora_checkpoint_dir}: {e}\n{traceback.format_exc()}")
-        return None, None
+        return None, None # Indicate failure
     
 
 def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, output_base_dir, checkpoint_label, sample_ids, prompt_variations):
