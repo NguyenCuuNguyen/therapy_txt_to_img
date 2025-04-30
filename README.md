@@ -41,3 +41,12 @@ Use model offloading (enable_model_cpu_offload) for DeepFloyd IF to move unused 
 ```rm -rf ~/.cache/huggingface/hub/models--*```
 
 ```python scripts/run_finetune_multiple_epochs.py```
+
+## Iteration 1: Generate images
+Run ```python scripts/generate_images_from_finetuned.py``` to
+1. Read prompts and specificity details from a CSV file (you'll need to create this based on your example).
+2. Identify the saved "best" and "last" LoRA checkpoints for each model configuration you trained.
+3. Load the appropriate base model (SDXL, Kandinsky).
+4. Load the corresponding LoRA weights onto the base model.
+5. Generate an image for each prompt using the fine-tuned model.
+6. Save the generated images with informative names.
