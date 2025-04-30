@@ -195,10 +195,11 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
             logger.info(f"Loading Kandinsky Decoder Pipeline ({decoder_id})...")
             pipeline = KandinskyV22Pipeline.from_pretrained(decoder_id, torch_dtype=target_dtype, use_safetensors=True)
             try:
-                logger.info(f"Loading Kandinsky VAE (MoVQ) in FP32 from {decoder_id}/movq")
-                vae = VQModel.from_pretrained(decoder_id, subfolder="movq", torch_dtype=torch.float32)
-                pipeline.movq = vae # Assign the fp32 VAE
-                logger.info("Loaded and assigned Kandinsky VQ VAE in FP32.")
+                # !--- Load Kandinsky VAE in target_dtype (fp16) ---!
+                logger.info(f"Loading Kandinsky VAE (MoVQ) in {target_dtype} from {decoder_id}/movq")
+                vae = VQModel.from_pretrained(decoder_id, subfolder="movq", torch_dtype=target_dtype) # Load in fp16
+                pipeline.movq = vae # Assign the fp16 VAE
+                logger.info(f"Loaded and assigned Kandinsky VQ VAE ({pipeline.movq.dtype}).")
             except Exception as e: logger.warning(f"Could not load separate VQ VAE for Kandinsky: {e}")
             logger.info("Loaded Kandinsky base pipelines.")
 
