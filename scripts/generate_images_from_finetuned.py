@@ -15,15 +15,17 @@ from diffusers import (
     DiffusionPipeline,
     AutoencoderKL,
     VQModel,
-    DPMSolverMultistepScheduler # Example scheduler
+    DPMSolverMultistepScheduler, # Example scheduler
+    KandinskyV22PriorPipeline,
+    KandinskyV22Pipeline,
 )
 from transformers import CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer
-from peft import PeftModel # Use PeftModel for loading adapters
+# from peft import PeftModel # Use PeftModel for loading adapters. # Removed PeftModel import as pipeline.load_lora_weights is used
 
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("/home/iris/Documents/deep_learning/src/logs/image_generation.log", mode='w'),
         logging.StreamHandler()
@@ -129,103 +131,103 @@ def find_checkpoint_dirs(base_model_dir):
     return checkpoints
 
 
-def load_pipeline_with_lora(model_name, base_model_id, lora_checkpoint_dir, device, target_dtype):
-    """Loads the base pipeline and attaches LoRA weights.
-        handle loading both pipelines for Kandinsky and return them.
-    """
+def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, device, target_dtype):
+    """Loads the base pipeline(s) and attaches LoRA weights."""
     logger.info(f"Loading base model components for {model_name}...")
-    pipeline = None # Will hold the main generation pipeline or decoder
-    prior_pipeline = None # Specific for Kandinsky
+    pipeline = None
+    prior_pipeline = None
+    # Define the expected LoRA weight filename (prioritize safetensors)
+    lora_weight_name = "adapter_model.safetensors"
+    lora_weight_name_bin = "adapter_model.bin" # Fallback
 
-    # --- SDXL Loading ---
-    if model_name == "sdxl":
-        base_model_id = base_model_ids["sdxl"]
-        logger.info("Loading SDXL VAE in FP32...")
-        vae = AutoencoderKL.from_pretrained(base_model_id, subfolder="vae", torch_dtype=torch.float32)
-        logger.info("Loading SDXL Pipeline components...")
-        pipeline = StableDiffusionXLPipeline.from_pretrained(
-            base_model_id, vae=vae, torch_dtype=target_dtype,
-            variant="fp16", use_safetensors=True,
-        )
-        # Assign text encoders explicitly for LoRA loading
-        pipeline.text_encoder = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder", torch_dtype=target_dtype, variant="fp16")
-        pipeline.text_encoder_2 = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder_2", torch_dtype=target_dtype, variant="fp16")
-
-    # --- Kandinsky Loading ---
-    elif model_name == "kandinsky":
-        prior_id = base_model_ids["kandinsky_prior"]
-        decoder_id = base_model_ids["kandinsky_decoder"]
-
-        logger.info(f"Loading Kandinsky Prior Pipeline ({prior_id})...")
-        prior_pipeline = KandinskyV22PriorPipeline.from_pretrained(
-            prior_id, torch_dtype=target_dtype
-        )
-        logger.info("Loaded Kandinsky Prior Pipeline.")
-
-        logger.info(f"Loading Kandinsky Decoder Pipeline ({decoder_id})...")
-        pipeline = KandinskyV22Pipeline.from_pretrained( # Use the specific class
-            decoder_id, torch_dtype=target_dtype, use_safetensors=True
-        )
-        logger.info("Loaded Kandinsky Decoder Pipeline.")
-
-        # Load and assign VAE in FP32 to the decoder pipeline
-        try:
-            logger.info(f"Loading Kandinsky VAE (MoVQ) in FP32 from {decoder_id}/movq")
-            vae = VQModel.from_pretrained(decoder_id, subfolder="movq", torch_dtype=torch.float32)
-            pipeline.movq = vae # Assign to the correct attribute name for KandinskyV22Pipeline
-            logger.info("Loaded and assigned Kandinsky VQ VAE in FP32.")
-        except Exception as e:
-            logger.warning(f"Could not load separate VQ VAE for Kandinsky: {e}")
-
-    else:
-        raise ValueError(f"Unsupported model_name for generation: {model_name}")
-
-    if pipeline is None and prior_pipeline is None: # Check if loading failed
-        raise RuntimeError(f"Failed to load base pipeline(s) for {model_name}")
-
-    # --- Load LoRA Weights ---
-    logger.info(f"Loading LoRA weights from: {lora_checkpoint_dir}")
     try:
+        # --- SDXL Loading ---
+        if model_name == "sdxl":
+            base_model_id = base_model_ids["sdxl"]
+            logger.info("Loading SDXL VAE in FP32...")
+            vae = AutoencoderKL.from_pretrained(base_model_id, subfolder="vae", torch_dtype=torch.float32)
+            logger.info("Loading SDXL Pipeline components...")
+            pipeline = StableDiffusionXLPipeline.from_pretrained(
+                base_model_id, vae=vae, torch_dtype=target_dtype,
+                variant="fp16", use_safetensors=True,
+            )
+            # Assign text encoders explicitly for LoRA loading
+            pipeline.text_encoder = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder", torch_dtype=target_dtype, variant="fp16")
+            pipeline.text_encoder_2 = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder_2", torch_dtype=target_dtype, variant="fp16")
+
+        # --- Kandinsky Loading ---
+        elif model_name == "kandinsky":
+            prior_id = base_model_ids["kandinsky_prior"]
+            decoder_id = base_model_ids["kandinsky_decoder"]
+            logger.info(f"Loading Kandinsky Prior Pipeline ({prior_id})...")
+            prior_pipeline = KandinskyV22PriorPipeline.from_pretrained(prior_id, torch_dtype=target_dtype)
+            logger.info(f"Loading Kandinsky Decoder Pipeline ({decoder_id})...")
+            pipeline = KandinskyV22Pipeline.from_pretrained(decoder_id, torch_dtype=target_dtype, use_safetensors=True)
+            try:
+                logger.info(f"Loading Kandinsky VAE (MoVQ) in FP32 from {decoder_id}/movq")
+                vae = VQModel.from_pretrained(decoder_id, subfolder="movq", torch_dtype=torch.float32)
+                pipeline.movq = vae
+                logger.info("Loaded and assigned Kandinsky VQ VAE in FP32.")
+            except Exception as e: logger.warning(f"Could not load separate VQ VAE for Kandinsky: {e}")
+
+        else:
+            raise ValueError(f"Unsupported model_name for generation: {model_name}")
+
+        if pipeline is None and prior_pipeline is None:
+            raise RuntimeError(f"Failed to load base pipeline(s) for {model_name}")
+
+        # --- Load LoRA Weights ---
+        logger.info(f"Loading LoRA weights from: {lora_checkpoint_dir}")
         unet_lora_path = os.path.join(lora_checkpoint_dir, "unet_lora")
         te1_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_lora")
-        te2_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_2_lora") # Only for SDXL
+        te2_lora_path = os.path.join(lora_checkpoint_dir, "text_encoder_2_lora")
 
-        # Load UNet LoRA (applies to decoder for Kandinsky, main pipeline for SDXL)
+        # Helper function to try loading safetensors then bin
+        """explicitly tell load_lora_weights the correct filename to look for within the subfolders."""
+        def _load_lora_weights_safely(pipe_component, subfolder_path, **kwargs):
+            try:
+                # Try loading safetensors first
+                logger.debug(f"Attempting to load LoRA from {subfolder_path} using {lora_weight_name}")
+                pipe_component.load_lora_weights(lora_checkpoint_dir, subfolder=os.path.basename(subfolder_path), weight_name=lora_weight_name, **kwargs)
+                logger.info(f"Successfully loaded LoRA from {subfolder_path} ({lora_weight_name})")
+            except OSError as e:
+                logger.warning(f"Could not find {lora_weight_name} in {subfolder_path}: {e}. Trying {lora_weight_name_bin}...")
+                try:
+                    # Fallback to bin
+                    pipe_component.load_lora_weights(lora_checkpoint_dir, subfolder=os.path.basename(subfolder_path), weight_name=lora_weight_name_bin, **kwargs)
+                    logger.info(f"Successfully loaded LoRA from {subfolder_path} ({lora_weight_name_bin})")
+                except OSError as e_bin:
+                    logger.error(f"Could not find {lora_weight_name_bin} either in {subfolder_path}: {e_bin}. LoRA loading failed for this component.")
+                except Exception as e_other:
+                     logger.error(f"Error loading LoRA ({lora_weight_name_bin}) from {subfolder_path}: {e_other}")
+            except Exception as e_other:
+                 logger.error(f"Error loading LoRA ({lora_weight_name}) from {subfolder_path}: {e_other}")
+
+
+        # Load UNet LoRA
         if os.path.exists(unet_lora_path) and hasattr(pipeline, 'unet'):
-            logger.info("Loading UNet LoRA weights...")
-            pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="unet_lora")
-            logger.info("Loaded UNet LoRA.")
+            _load_lora_weights_safely(pipeline, "unet_lora") # Pass pipeline, subfolder name
 
-        # Load Text Encoder LoRA
+        # Load Text Encoder LoRA(s)
         if model_name == "sdxl":
             if os.path.exists(te1_lora_path) and hasattr(pipeline, 'text_encoder'):
-                logger.info("Loading SDXL Text Encoder 1 LoRA weights...")
-                pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_lora", text_encoder=pipeline.text_encoder)
-                logger.info("Loaded Text Encoder 1 LoRA.")
+                _load_lora_weights_safely(pipeline, "text_encoder_lora", text_encoder=pipeline.text_encoder)
             if os.path.exists(te2_lora_path) and hasattr(pipeline, 'text_encoder_2'):
-                logger.info("Loading SDXL Text Encoder 2 LoRA weights...")
-                pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_2_lora", text_encoder=pipeline.text_encoder_2)
-                logger.info("Loaded Text Encoder 2 LoRA.")
+                 _load_lora_weights_safely(pipeline, "text_encoder_2_lora", text_encoder=pipeline.text_encoder_2)
         elif model_name == "kandinsky":
-            # LoRA for Kandinsky was trained on the *prior's* text encoder
+            # Load into the prior pipeline's text encoder
             if os.path.exists(te1_lora_path) and prior_pipeline and hasattr(prior_pipeline, 'text_encoder'):
-                logger.info("Loading Kandinsky Prior Text Encoder LoRA weights...")
-                prior_pipeline.load_lora_weights(lora_checkpoint_dir, subfolder="text_encoder_lora") # Load into prior
-                logger.info("Loaded Prior Text Encoder LoRA.")
+                 _load_lora_weights_safely(prior_pipeline, "text_encoder_lora") # Pass prior_pipeline
 
         # Move pipelines to device
         if pipeline: pipeline.to(device)
         if prior_pipeline: prior_pipeline.to(device)
 
         logger.info(f"Pipeline(s) with LoRA loaded successfully for {model_name}.")
-        # Return both pipelines for Kandinsky, otherwise just the main one
-        if model_name == "kandinsky":
-            return prior_pipeline, pipeline
-        else:
-            return pipeline, None # Return None for prior_pipeline for non-Kandinsky models
+        return pipeline, prior_pipeline
 
     except Exception as e:
-        logger.error(f"Failed to load LoRA weights for {model_name} from {lora_checkpoint_dir}: {e}\n{traceback.format_exc()}")
+        logger.error(f"Failed during model or LoRA loading for {model_name} from {lora_checkpoint_dir}: {e}\n{traceback.format_exc()}")
         return None, None # Indicate failure
 
 def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, output_base_dir, checkpoint_label, sample_ids, prompt_variations):
@@ -363,8 +365,8 @@ def main():
     if not os.path.exists(prompts_csv_path): logger.error(f"Prompts CSV not found: {prompts_csv_path}"); return
     try:
         prompts_df = pd.read_csv(prompts_csv_path)
-        if 'id' not in prompts_df.columns: logger.error("CSV missing 'id' column."); return
-        prompts_df['id'] = prompts_df['id'].astype(str)
+        if 'file' not in prompts_df.columns: logger.error("CSV missing 'file' column."); return
+        prompts_df['file'] = prompts_df['file'].astype(str)
         logger.info(f"Loaded {len(prompts_df)} total prompts from {prompts_csv_path}")
     except Exception as e: logger.error(f"Failed to load prompts CSV: {e}"); return
 
