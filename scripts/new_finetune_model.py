@@ -89,7 +89,8 @@ class FinetuneModel:
         self.prior = None
         self.decoder = None
         self.image_processor = None
-        self.embedding_projection = None
+        self.text_embedding_projection = None
+        self.image_embedding_projection = None
         self.image_size = 1024
         self.best_val_loss = float('inf')
         self.best_epoch = -1
@@ -199,10 +200,13 @@ class FinetuneModel:
                 self.prior = pipe.prior.to(self.device)
                 self.decoder = pipe.decoder.to(self.device)
                 self.image_processor = CLIPImageProcessor()
-                # Fallback projection layer for text embeddings
+                # Fallback projection layers
                 if self.text_encoder.config.hidden_size != 768:
                     self.logger.warning(f"Text encoder hidden size is {self.text_encoder.config.hidden_size}, adding projection layer to map to 768")
-                    self.embedding_projection = torch.nn.Linear(self.text_encoder.config.hidden_size, 768).to(self.device, dtype=self.dtype)
+                    self.text_embedding_projection = torch.nn.Linear(self.text_encoder.config.hidden_size, 768).to(self.device, dtype=self.dtype)
+                if self.vision_encoder.config.hidden_size != 768:
+                    self.logger.warning(f"Vision encoder hidden size is {self.vision_encoder.config.hidden_size}, adding projection layer to map to 768")
+                    self.image_embedding_projection = torch.nn.Linear(self.vision_encoder.config.hidden_size, 768).to(self.device, dtype=self.dtype)
                 self.text_encoder.train()
                 self.vision_encoder.train()
                 self.prior.train()
@@ -351,8 +355,10 @@ class FinetuneModel:
             self.prior.eval()
         if self.decoder:
             self.decoder.eval()
-        if self.embedding_projection:
-            self.embedding_projection.eval()
+        if self.text_embedding_projection:
+            self.text_embedding_projection.eval()
+        if self.image_embedding_projection:
+            self.image_embedding_projection.eval()
         with torch.no_grad():
             for batch in dataloader:
                 try:
@@ -425,10 +431,13 @@ class FinetuneModel:
                             prompts, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt"
                         ).to(self.device)
                         text_embeddings = self.text_encoder(inputs.input_ids)[0].to(self.device)
-                        self.logger.debug(f"Embedding shapes: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
-                        # Apply projection if needed
-                        if self.embedding_projection is not None:
-                            text_embeddings = self.embedding_projection(text_embeddings)
+                        self.logger.debug(f"Embedding shapes before projection: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
+                        # Apply projections if needed
+                        if self.text_embedding_projection is not None:
+                            text_embeddings = self.text_embedding_projection(text_embeddings)
+                        if self.image_embedding_projection is not None:
+                            image_embeddings = self.image_embedding_projection(image_embeddings)
+                        self.logger.debug(f"Embedding shapes after projection: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
                         prior_noise = torch.randn_like(image_embeddings).to(self.device)
                         prior_timesteps = torch.randint(0, 1000, (image_embeddings.shape[0],), device=self.device).long()
                         prior_noisy_input = torch.randn_like(image_embeddings).to(self.device)
@@ -481,8 +490,10 @@ class FinetuneModel:
             self.prior.train()
         if self.decoder:
             self.decoder.train()
-        if self.embedding_projection:
-            self.embedding_projection.train()
+        if self.text_embedding_projection:
+            self.text_embedding_projection.train()
+        if self.image_embedding_projection:
+            self.image_embedding_projection.train()
         if num_batches == 0:
             self.logger.warning("No valid validation batches processed.")
             return float('inf')
@@ -637,10 +648,14 @@ class FinetuneModel:
                     decoder_params = list(filter(lambda p: p.requires_grad, self.decoder.parameters()))
                     params_to_optimize.extend(decoder_params)
                     trainable_param_count += sum(p.numel() for p in decoder_params)
-                if self.embedding_projection:
-                    proj_params = list(filter(lambda p: p.requires_grad, self.embedding_projection.parameters()))
-                    params_to_optimize.extend(proj_params)
-                    trainable_param_count += sum(p.numel() for p in proj_params)
+                if self.text_embedding_projection:
+                    text_proj_params = list(filter(lambda p: p.requires_grad, self.text_embedding_projection.parameters()))
+                    params_to_optimize.extend(text_proj_params)
+                    trainable_param_count += sum(p.numel() for p in text_proj_params)
+                if self.image_embedding_projection:
+                    image_proj_params = list(filter(lambda p: p.requires_grad, self.image_embedding_projection.parameters()))
+                    params_to_optimize.extend(image_proj_params)
+                    trainable_param_count += sum(p.numel() for p in image_proj_params)
             
             if not params_to_optimize:
                 self.logger.warning("No trainable parameters found.")
@@ -752,9 +767,13 @@ class FinetuneModel:
                                 prompts, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt"
                             ).to(self.device)
                             text_embeddings = self.text_encoder(inputs.input_ids)[0].to(self.device)
-                            self.logger.debug(f"Embedding shapes: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
-                            if self.embedding_projection is not None:
-                                text_embeddings = self.embedding_projection(text_embeddings)
+                            self.logger.debug(f"Embedding shapes before projection: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
+                            # Apply projections if needed
+                            if self.text_embedding_projection is not None:
+                                text_embeddings = self.text_embedding_projection(text_embeddings)
+                            if self.image_embedding_projection is not None:
+                                image_embeddings = self.image_embedding_projection(image_embeddings)
+                            self.logger.debug(f"Embedding shapes after projection: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
                             prior_noise = torch.randn_like(image_embeddings).to(self.device)
                             prior_timesteps = torch.randint(0, 1000, (image_embeddings.shape[0],), device=self.device).long()
                             prior_noisy_input = torch.randn_like(image_embeddings).to(self.device)
