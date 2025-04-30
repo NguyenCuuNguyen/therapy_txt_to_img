@@ -15,7 +15,7 @@ from diffusers import (
     AutoencoderKL
 )
 from peft import LoraConfig, get_peft_model
-from transformers import CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer, CLIPImageProcessor
+from transformers import CLIPTextModel, CLIPVisionModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer, CLIPImageProcessor
 from torch.utils.data import DataLoader, Subset
 from PIL import Image
 import gc
@@ -63,7 +63,6 @@ def summarize_prompt(prompt, max_tokens=77):
 def format_topic_prompt(prompt_template, topic_description):
     """Format the prompt template with the topic description."""
     try:
-        # Combine topic descriptions into a single string
         desc_str = "; ".join([f"{key}: {value}" for key, value in topic_description.items() if value])
         return prompt_template.format(txt_prompt=desc_str)
     except Exception as e:
@@ -82,6 +81,7 @@ class FinetuneModel:
         self.tokenizer = None
         self.tokenizer_2 = None
         self.text_encoder = None
+        self.vision_encoder = None
         self.text_encoder_2 = None
         self.unet = None
         self.scheduler = None
@@ -89,6 +89,7 @@ class FinetuneModel:
         self.prior = None
         self.decoder = None
         self.image_processor = None
+        self.embedding_projection = None
         self.image_size = 1024
         self.best_val_loss = float('inf')
         self.best_epoch = -1
@@ -98,6 +99,9 @@ class FinetuneModel:
         """Load the specified diffusion model and its components."""
         self.logger.info(f"Loading model: {self.model_name}")
         try:
+            import transformers
+            import diffusers
+            self.logger.info(f"Transformers version: {transformers.__version__}, Diffusers version: {diffusers.__version__}")
             if self.model_name == "sdxl":
                 self.image_size = 1024
                 vae_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
@@ -106,7 +110,8 @@ class FinetuneModel:
                 vae = AutoencoderKL.from_pretrained(
                     vae_model_id,
                     subfolder="vae",
-                    torch_dtype=torch.float32
+                    torch_dtype=torch.float32,
+                    cache_dir="/tmp/hf_cache"
                 ).to(self.device)
                 vae.eval()
                 self.logger.info("Loaded VAE in FP32.")
@@ -117,6 +122,7 @@ class FinetuneModel:
                     torch_dtype=self.dtype,
                     variant="fp16",
                     use_safetensors=True,
+                    cache_dir="/tmp/hf_cache"
                 ).to(self.device)
                 self.pipeline = pipe
                 self.tokenizer = pipe.tokenizer
@@ -138,7 +144,8 @@ class FinetuneModel:
                 vae = VQModel.from_pretrained(
                     decoder_model_id,
                     subfolder="movq",
-                    torch_dtype=torch.float32
+                    torch_dtype=torch.float32,
+                    cache_dir="/tmp/hf_cache"
                 ).to(self.device)
                 vae.eval()
                 self.vae = vae
@@ -147,7 +154,8 @@ class FinetuneModel:
                 decoder_pipe = DiffusionPipeline.from_pretrained(
                     decoder_model_id,
                     torch_dtype=self.dtype,
-                    use_safetensors=True
+                    use_safetensors=True,
+                    cache_dir="/tmp/hf_cache"
                 ).to(self.device)
                 self.pipeline = decoder_pipe
                 self.unet = decoder_pipe.unet
@@ -156,10 +164,10 @@ class FinetuneModel:
                 self.logger.info(f"Loading Kandinsky text encoder/tokenizer from {prior_model_id}...")
                 self.text_encoder = CLIPTextModel.from_pretrained(
                     prior_model_id, subfolder="text_encoder", torch_dtype=self.dtype,
-                    use_safetensors=False
+                    use_safetensors=False, cache_dir="/tmp/hf_cache"
                 ).to(self.device)
                 self.tokenizer = CLIPTokenizer.from_pretrained(
-                    prior_model_id, subfolder="tokenizer"
+                    prior_model_id, subfolder="tokenizer", cache_dir="/tmp/hf_cache"
                 )
                 self.logger.info("Loaded Kandinsky text encoder/tokenizer.")
                 self.unet.train()
@@ -168,26 +176,38 @@ class FinetuneModel:
             elif self.model_name == "karlo":
                 self.image_size = 256
                 karlo_model_id = "kakaobrain/karlo-v1-alpha"
+                clip_id = "openai/clip-vit-large-patch14"
                 self.logger.info(f"Loading Karlo pipeline ({karlo_model_id})...")
                 pipe = UnCLIPPipeline.from_pretrained(
                     karlo_model_id,
                     torch_dtype=self.dtype,
-                    use_safetensors=True
+                    use_safetensors=True,
+                    cache_dir="/tmp/hf_cache"
                 )
                 self.pipeline = pipe
-                self.text_encoder = pipe.text_encoder
+                self.logger.info(f"Loading CLIP text encoder from {clip_id}...")
+                self.text_encoder = CLIPTextModel.from_pretrained(
+                    clip_id, torch_dtype=self.dtype, use_safetensors=False, cache_dir="/tmp/hf_cache"
+                ).to(self.device)
+                self.logger.info(f"Text encoder hidden size: {self.text_encoder.config.hidden_size}")
+                self.logger.info(f"Loading CLIP vision encoder from {clip_id}...")
+                self.vision_encoder = CLIPVisionModel.from_pretrained(
+                    clip_id, torch_dtype=self.dtype, use_safetensors=False, cache_dir="/tmp/hf_cache"
+                ).to(self.device)
+                self.logger.info(f"Vision encoder hidden size: {self.vision_encoder.config.hidden_size}")
                 self.tokenizer = pipe.tokenizer
-                self.prior = pipe.prior
-                self.decoder = pipe.decoder
-                self.scheduler = pipe.scheduler
+                self.prior = pipe.prior.to(self.device)
+                self.decoder = pipe.decoder.to(self.device)
                 self.image_processor = CLIPImageProcessor()
-                self.text_encoder.to(self.device)
-                self.prior.to(self.device)
-                self.decoder.to(self.device)
+                # Fallback projection layer for text embeddings
+                if self.text_encoder.config.hidden_size != 768:
+                    self.logger.warning(f"Text encoder hidden size is {self.text_encoder.config.hidden_size}, adding projection layer to map to 768")
+                    self.embedding_projection = torch.nn.Linear(self.text_encoder.config.hidden_size, 768).to(self.device, dtype=self.dtype)
                 self.text_encoder.train()
+                self.vision_encoder.train()
                 self.prior.train()
                 self.decoder.train()
-                self.logger.info("Loaded Karlo components (Text Encoder, Prior, Decoder in FP16).")
+                self.logger.info("Loaded Karlo components (Text Encoder, Vision Encoder, Prior, Decoder in FP16).")
             elif self.model_name == "deepfloyd_if":
                 self.image_size = 64
                 if_model_id = "DeepFloyd/IF-I-XL-v1.0"
@@ -196,7 +216,8 @@ class FinetuneModel:
                     if_model_id,
                     variant="fp16",
                     torch_dtype=self.dtype,
-                    use_safetensors=True
+                    use_safetensors=True,
+                    cache_dir="/tmp/hf_cache"
                 ).to(self.device)
                 self.pipeline = pipe
                 self.text_encoder = pipe.text_encoder
@@ -248,6 +269,9 @@ class FinetuneModel:
                     )
                     self.text_encoder_2 = get_peft_model(self.text_encoder_2, lora_config_clip_2)
                     self.logger.info(f"Applied LoRA to Text Encoder 2 ({self.model_name}, type: CLIP)")
+                if self.model_name == "karlo" and self.vision_encoder:
+                    self.vision_encoder = get_peft_model(self.vision_encoder, lora_config_text)
+                    self.logger.info(f"Applied LoRA to Vision Encoder ({self.model_name}, type: CLIP)")
             elif self.text_encoder:
                 self.logger.info(f"Skipped applying LoRA to Text Encoder 1 for {self.model_name}")
 
@@ -307,7 +331,7 @@ class FinetuneModel:
     def _get_add_time_ids(self, original_size, crops_coords_top_left, target_size, dtype):
         """Helper to generate SDXL time IDs."""
         add_time_ids = list(original_size + crops_coords_top_left + target_size)
-        add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
+        add_time_ids = torch.tensor([add_time_ids], dtype=dtype).to(self.device)
         return add_time_ids
 
     def validate(self, dataloader, dataset_path):
@@ -319,12 +343,16 @@ class FinetuneModel:
             self.unet.eval()
         if self.text_encoder:
             self.text_encoder.eval()
+        if self.vision_encoder:
+            self.vision_encoder.eval()
         if self.text_encoder_2:
             self.text_encoder_2.eval()
         if self.prior:
             self.prior.eval()
         if self.decoder:
             self.decoder.eval()
+        if self.embedding_projection:
+            self.embedding_projection.eval()
         with torch.no_grad():
             for batch in dataloader:
                 try:
@@ -361,7 +389,7 @@ class FinetuneModel:
                         scaling_factor = getattr(self.vae.config, 'scaling_factor', 0.18215)
                         latents = latents * scaling_factor
                         latents = latents.to(dtype=self.dtype)
-                        noise = torch.randn_like(latents)
+                        noise = torch.randn_like(latents).to(self.device)
                         timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=self.device).long()
                         noisy_input = self.scheduler.add_noise(latents, noise, timesteps)
                         target_values = noise
@@ -391,23 +419,28 @@ class FinetuneModel:
                             model_pred = model_pred[:, :target_values.shape[1], :, :]
                         loss = torch.nn.functional.mse_loss(model_pred.float(), target_values.float(), reduction="mean")
                     elif self.model_name == "karlo":
-                        pixel_values_norm = pixel_values * 2.0 - 1.0
-                        image_inputs = self.image_processor(pixel_values_norm, return_tensors="pt").to(self.device, dtype=self.dtype)
-                        image_embeddings = self.text_encoder(image_inputs['pixel_values'])[0]
+                        image_inputs = self.image_processor(pixel_values, return_tensors="pt").to(self.device, dtype=self.dtype)
+                        image_embeddings = self.vision_encoder(image_inputs['pixel_values']).last_hidden_state.to(self.device)
                         inputs = self.tokenizer(
                             prompts, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt"
                         ).to(self.device)
-                        text_embeddings = self.text_encoder(inputs.input_ids)[0]
-                        prior_noise = torch.randn_like(image_embeddings)
-                        prior_timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (image_embeddings.shape[0],), device=self.device).long()
-                        prior_noisy_input = self.scheduler.add_noise(image_embeddings, prior_noise, prior_timesteps)
+                        text_embeddings = self.text_encoder(inputs.input_ids)[0].to(self.device)
+                        self.logger.debug(f"Embedding shapes: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
+                        # Apply projection if needed
+                        if self.embedding_projection is not None:
+                            text_embeddings = self.embedding_projection(text_embeddings)
+                        prior_noise = torch.randn_like(image_embeddings).to(self.device)
+                        prior_timesteps = torch.randint(0, 1000, (image_embeddings.shape[0],), device=self.device).long()
+                        prior_noisy_input = torch.randn_like(image_embeddings).to(self.device)
+                        self.logger.debug(f"Prior input devices: prior_noisy_input={prior_noisy_input.device}, prior_timesteps={prior_timesteps.device}, text_embeddings={text_embeddings.device}, image_embeddings={image_embeddings.device}")
                         prior_pred = self.prior(
-                            prior_noisy_input, timestep=prior_timesteps, encoder_hidden_states=text_embeddings
+                            prior_noisy_input, timestep=prior_timesteps, encoder_hidden_states=text_embeddings, proj_embedding=image_embeddings
                         ).sample
                         prior_loss = torch.nn.functional.mse_loss(prior_pred.float(), prior_noise.float(), reduction="mean")
-                        decoder_noise = torch.randn_like(pixel_values_norm)
-                        decoder_timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (pixel_values.shape[0],), device=self.device).long()
-                        decoder_noisy_input = self.scheduler.add_noise(pixel_values_norm, decoder_noise, decoder_timesteps)
+                        pixel_values_norm = pixel_values * 2.0 - 1.0
+                        decoder_noise = torch.randn_like(pixel_values_norm).to(self.device)
+                        decoder_timesteps = torch.randint(0, 1000, (pixel_values.shape[0],), device=self.device).long()
+                        decoder_noisy_input = torch.randn_like(pixel_values_norm).to(self.device)
                         decoder_pred = self.decoder(
                             decoder_noisy_input, timestep=decoder_timesteps, encoder_hidden_states=image_embeddings
                         ).sample
@@ -415,7 +448,7 @@ class FinetuneModel:
                         loss = prior_loss + decoder_loss
                     elif self.model_name == "deepfloyd_if":
                         pixel_values = pixel_values.to(dtype=self.dtype)
-                        noise = torch.randn_like(pixel_values)
+                        noise = torch.randn_like(pixel_values).to(self.device)
                         timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (pixel_values.shape[0],), device=self.device).long()
                         noisy_input = self.scheduler.add_noise(pixel_values, noise, timesteps)
                         target_values = noise
@@ -440,12 +473,16 @@ class FinetuneModel:
             self.unet.train()
         if self.text_encoder:
             self.text_encoder.train()
+        if self.vision_encoder:
+            self.vision_encoder.train()
         if self.text_encoder_2:
             self.text_encoder_2.train()
         if self.prior:
             self.prior.train()
         if self.decoder:
             self.decoder.train()
+        if self.embedding_projection:
+            self.embedding_projection.train()
         if num_batches == 0:
             self.logger.warning("No valid validation batches processed.")
             return float('inf')
@@ -471,6 +508,10 @@ class FinetuneModel:
             self.text_encoder_2.save_pretrained(te2_path)
             save_paths["TextEncoder2"] = te2_path
         if self.model_name == "karlo":
+            if self.vision_encoder and hasattr(self.vision_encoder, 'save_pretrained') and any(p.requires_grad for p in self.vision_encoder.parameters()):
+                vision_path = os.path.join(self.output_dir, f"vision_encoder_lora_epoch_{epoch}")
+                self.vision_encoder.save_pretrained(vision_path)
+                save_paths["VisionEncoder"] = vision_path
             if self.prior and hasattr(self.prior, 'save_pretrained') and any(p.requires_grad for p in self.prior.parameters()):
                 prior_path = os.path.join(self.output_dir, f"prior_lora_epoch_{epoch}")
                 self.prior.save_pretrained(prior_path)
@@ -498,24 +539,21 @@ class FinetuneModel:
         """Generate an image based on the prompt template and topic description."""
         self.logger.info(f"Generating image for {self.model_name} with theory {theory}")
         try:
-            # Format the prompt
             prompt = format_topic_prompt(prompt_template, topic_description)
             if self.model_name == "deepfloyd_if":
                 prompt = summarize_prompt(prompt, max_tokens=self.tokenizer.model_max_length)
-
-            # Set model to evaluation mode
             if self.unet:
                 self.unet.eval()
             if self.text_encoder:
                 self.text_encoder.eval()
+            if self.vision_encoder:
+                self.vision_encoder.eval()
             if self.text_encoder_2:
                 self.text_encoder_2.eval()
             if self.prior:
                 self.prior.eval()
             if self.decoder:
                 self.decoder.eval()
-
-            # Generate image
             with torch.no_grad():
                 if self.model_name in ["sdxl", "kandinsky", "deepfloyd_if"]:
                     image = self.pipeline(
@@ -531,20 +569,19 @@ class FinetuneModel:
                         num_inference_steps=50,
                         guidance_scale=7.5
                     ).images[0]
-                    image = image.resize((1024, 1024))  # Upscale to 1024x1024
-
-            # Reset model to training mode
+                    image = image.resize((1024, 1024))
             if self.unet:
                 self.unet.train()
             if self.text_encoder:
                 self.text_encoder.train()
+            if self.vision_encoder:
+                self.vision_encoder.train()
             if self.text_encoder_2:
                 self.text_encoder_2.train()
             if self.prior:
                 self.prior.train()
             if self.decoder:
                 self.decoder.train()
-
             return image
         except Exception as e:
             self.logger.error(f"Failed to generate image for {self.model_name}: {e}\n{traceback.format_exc()}")
@@ -588,6 +625,10 @@ class FinetuneModel:
                 params_to_optimize.extend(te2_params)
                 trainable_param_count += sum(p.numel() for p in te2_params)
             if self.model_name == "karlo":
+                if self.vision_encoder:
+                    vision_params = list(filter(lambda p: p.requires_grad, self.vision_encoder.parameters()))
+                    params_to_optimize.extend(vision_params)
+                    trainable_param_count += sum(p.numel() for p in vision_params)
                 if self.prior:
                     prior_params = list(filter(lambda p: p.requires_grad, self.prior.parameters()))
                     params_to_optimize.extend(prior_params)
@@ -596,6 +637,10 @@ class FinetuneModel:
                     decoder_params = list(filter(lambda p: p.requires_grad, self.decoder.parameters()))
                     params_to_optimize.extend(decoder_params)
                     trainable_param_count += sum(p.numel() for p in decoder_params)
+                if self.embedding_projection:
+                    proj_params = list(filter(lambda p: p.requires_grad, self.embedding_projection.parameters()))
+                    params_to_optimize.extend(proj_params)
+                    trainable_param_count += sum(p.numel() for p in proj_params)
             
             if not params_to_optimize:
                 self.logger.warning("No trainable parameters found.")
@@ -668,7 +713,7 @@ class FinetuneModel:
                             scaling_factor = getattr(self.vae.config, 'scaling_factor', 0.18215)
                             latents = latents * scaling_factor
                             latents = latents.to(dtype=self.dtype)
-                            noise = torch.randn_like(latents)
+                            noise = torch.randn_like(latents).to(self.device)
                             timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=self.device).long()
                             noisy_input = self.scheduler.add_noise(latents, noise, timesteps)
                             target_values = noise
@@ -692,24 +737,36 @@ class FinetuneModel:
                                 encoder_hidden_states = temp_hidden_states
                                 zero_image_embeds = torch.zeros((noisy_input.shape[0], 1280), dtype=self.dtype, device=self.device)
                                 added_cond_kwargs["image_embeds"] = zero_image_embeds
+                            model_pred = self.unet(
+                                noisy_input, timestep=timesteps, encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs
+                            ).sample
+                            if model_pred.shape[1] == target_values.shape[1] * 2:
+                                model_pred = model_pred[:, :target_values.shape[1], :, :]
+                            if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
+                                continue
+                            loss = torch.nn.functional.mse_loss(model_pred.float(), target_values.float(), reduction="mean")
                         elif self.model_name == "karlo":
-                            pixel_values_norm = pixel_values * 2.0 - 1.0
-                            image_inputs = self.image_processor(pixel_values_norm, return_tensors="pt").to(self.device, dtype=self.dtype)
-                            image_embeddings = self.text_encoder(image_inputs['pixel_values'])[0]
+                            image_inputs = self.image_processor(pixel_values, return_tensors="pt").to(self.device, dtype=self.dtype)
+                            image_embeddings = self.vision_encoder(image_inputs['pixel_values']).last_hidden_state.to(self.device)
                             inputs = self.tokenizer(
                                 prompts, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt"
                             ).to(self.device)
-                            text_embeddings = self.text_encoder(inputs.input_ids)[0]
-                            prior_noise = torch.randn_like(image_embeddings)
-                            prior_timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (image_embeddings.shape[0],), device=self.device).long()
-                            prior_noisy_input = self.scheduler.add_noise(image_embeddings, prior_noise, prior_timesteps)
+                            text_embeddings = self.text_encoder(inputs.input_ids)[0].to(self.device)
+                            self.logger.debug(f"Embedding shapes: text_embeddings={text_embeddings.shape}, image_embeddings={image_embeddings.shape}")
+                            if self.embedding_projection is not None:
+                                text_embeddings = self.embedding_projection(text_embeddings)
+                            prior_noise = torch.randn_like(image_embeddings).to(self.device)
+                            prior_timesteps = torch.randint(0, 1000, (image_embeddings.shape[0],), device=self.device).long()
+                            prior_noisy_input = torch.randn_like(image_embeddings).to(self.device)
+                            self.logger.debug(f"Prior input devices: prior_noisy_input={prior_noisy_input.device}, prior_timesteps={prior_timesteps.device}, text_embeddings={text_embeddings.device}, image_embeddings={image_embeddings.device}")
                             prior_pred = self.prior(
-                                prior_noisy_input, timestep=prior_timesteps, encoder_hidden_states=text_embeddings
+                                prior_noisy_input, timestep=prior_timesteps, encoder_hidden_states=text_embeddings, proj_embedding=image_embeddings
                             ).sample
                             prior_loss = torch.nn.functional.mse_loss(prior_pred.float(), prior_noise.float(), reduction="mean")
-                            decoder_noise = torch.randn_like(pixel_values_norm)
-                            decoder_timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (pixel_values.shape[0],), device=self.device).long()
-                            decoder_noisy_input = self.scheduler.add_noise(pixel_values_norm, decoder_noise, decoder_timesteps)
+                            pixel_values_norm = pixel_values * 2.0 - 1.0
+                            decoder_noise = torch.randn_like(pixel_values_norm).to(self.device)
+                            decoder_timesteps = torch.randint(0, 1000, (pixel_values.shape[0],), device=self.device).long()
+                            decoder_noisy_input = torch.randn_like(pixel_values_norm).to(self.device)
                             decoder_pred = self.decoder(
                                 decoder_noisy_input, timestep=decoder_timesteps, encoder_hidden_states=image_embeddings
                             ).sample
@@ -717,7 +774,7 @@ class FinetuneModel:
                             loss = prior_loss + decoder_loss
                         elif self.model_name == "deepfloyd_if":
                             pixel_values = pixel_values.to(dtype=self.dtype)
-                            noise = torch.randn_like(pixel_values)
+                            noise = torch.randn_like(pixel_values).to(self.device)
                             timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (pixel_values.shape[0],), device=self.device).long()
                             noisy_input = self.scheduler.add_noise(pixel_values, noise, timesteps)
                             target_values = noise
@@ -779,3 +836,16 @@ class FinetuneModel:
             self.logger.info(f"Cleaning up GPU memory after fine-tuning {self.model_name}.")
             gc.collect()
             torch.cuda.empty_cache()
+
+if __name__ == "__main__":
+    config_path = "/home/iris/Documents/deep_learning/config/config.yaml"
+    model = FinetuneModel(model_name="karlo", output_dir="/home/iris/Documents/deep_learning/experiments/custom_finetuned/karlo", logger_instance=logger)
+    model.load_model()
+    model.modify_architecture()
+    model.fine_tune(
+        dataset_path="/home/iris/Documents/deep_learning/data/finetune_dataset/coco/dataset.json",
+        epochs=5,
+        batch_size=1,
+        learning_rate=1e-5,
+        val_split=0.2
+    )
