@@ -404,13 +404,35 @@ def generate_images(
     else: logger.warning("Sample ID list is empty!")
 
     prompts_processed_count = 0
+    # --- Define Topic Columns (adjust based on your CSV) ---
+    # Exclude ID/file and potentially the concatenated details column
+    all_columns = prompts_df.columns.tolist()
+    topic_columns = [col for col in all_columns if col not in ['file']] # Adjust exclusion list
+    logger.info(f"Identified {len(topic_columns)} topic columns: {topic_columns[:5]}...") # Log first few
+
     for index, row in prompts_df.iterrows():
         file_id = str(row.get('file', f'row_{index}')).strip()
         logger.debug(f"Checking file ID: '{file_id}' (Type: {type(file_id)}) against sample_ids set.")
         if file_id not in sample_ids: logger.debug(f"Skipping file ID '{file_id}'."); continue
 
         prompts_processed_count += 1
-        prompt_details = row.get('prompt_details', '')
+        # --- Create Topic Dictionary String ---
+        try:
+            # Select only the defined topic columns for the current row
+            topic_data = row[topic_columns]
+            # Convert to dictionary, dropping columns where the value is NaN/None
+            topic_dict = topic_data.dropna().to_dict()
+            # Format into string: "'key1': 'value1', 'key2': 'value2', ..."
+            # Filter out empty string values after stripping whitespace
+            topic_string = ", ".join([f"'{k}': '{str(v).strip()}'" for k, v in topic_dict.items() if isinstance(v, str) and str(v).strip()])
+            # Add curly braces for dictionary-like appearance
+            topic_string_formatted = f"{{{topic_string}}}" if topic_string else "{}" # Represent as empty dict if no topics
+            logger.debug(f"File ID {file_id} - Topic String: {topic_string_formatted[:200]}...")
+        except Exception as e:
+            logger.error(f"Error creating topic string for file ID {file_id}: {e}")
+            continue # Skip this prompt if topics cannot be formatted
+        # ---
+
         logger.info(f"Processing File ID: {file_id} (Row {index})")
 
         for variation_name, prompt_template in prompt_variations.items():
@@ -420,10 +442,15 @@ def generate_images(
             os.makedirs(variation_output_dir, exist_ok=True)
 
             try:
-                base_final_prompt = prompt_template.format(txt_prompt=prompt_details)
-                # Add quality boosters
+                # !--- Format using the topic_string_formatted ---!
+                base_final_prompt = prompt_template.format(txt_prompt=topic_string_formatted)
                 final_prompt = base_final_prompt + pos_quality_boost
-                negative_prompt = neg_quality_boost # Start negative prompt with quality terms
+                negative_prompt = neg_quality_boost
+            except KeyError:
+                 logger.error(f"  Template for '{variation_name}' might be missing '{{txt_prompt}}' placeholder. Using topic string directly.")
+                 # Fallback if placeholder missing
+                 final_prompt = topic_string + pos_quality_boost
+                 negative_prompt = neg_quality_boost
             except Exception as fmt_err: logger.error(f"  Error formatting prompt: {fmt_err}"); continue
             
             # !--- Summarize the prompt BEFORE passing to pipeline ---!
@@ -568,6 +595,7 @@ def main():
 
     base_model_ids = {
         "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+        "sdxl_refiner": "stabilityai/stable-diffusion-xl-refiner-1.0", # Add Refiner ID
         "kandinsky_prior": "kandinsky-community/kandinsky-2-2-prior",
         "kandinsky_decoder": "kandinsky-community/kandinsky-2-2-decoder",
     }
@@ -588,17 +616,26 @@ def main():
         # Add more sets as needed
     ]
 
-    # --- Pre-load Refiner if needed ---
+    # --- Pre-load Refiner ---
     refiner_pipeline = None
     if "sdxl" in models_to_generate:
-        logger.info("Pre-loading SDXL Refiner pipeline...")
-        try:
-            refiner_pipeline = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-                base_model_ids["sdxl_refiner"],
-                torch_dtype=target_dtype, use_safetensors=True, variant="fp16"
-            ).to(device)
-            logger.info("SDXL Refiner loaded successfully.")
-        except Exception as e: logger.error(f"Failed to load SDXL Refiner: {e}.")
+        refiner_id = base_model_ids.get("sdxl_refiner")
+        if refiner_id:
+            logger.info(f"Pre-loading SDXL Refiner pipeline ({refiner_id})...")
+            try:
+                # !--- Load Refiner simply, letting it manage its VAE ---!
+                refiner_pipeline = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+                    refiner_id,
+                    torch_dtype=target_dtype, # Load in target dtype (fp16)
+                    use_safetensors=True,
+                    variant="fp16"
+                ).to(device)
+                logger.info("SDXL Refiner loaded successfully.")
+            except Exception as e:
+                logger.error(f"Failed to load SDXL Refiner: {e}\n{traceback.format_exc()}")
+                refiner_pipeline = None
+        else:
+            logger.error("SDXL Refiner ID missing in base_model_ids dictionary.")
 
     for model_name in models_to_generate:
         model_finetune_base = os.path.join(base_output_dir, model_name)
