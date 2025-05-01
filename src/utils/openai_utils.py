@@ -9,7 +9,7 @@ import logging
 import yaml
 import re
 import traceback
-from transformers import CLIPTokenizer
+from transformers import T5Tokenizer  # Use T5 tokenizer for consistency
 
 # Configure basic logging if run standalone or imported early
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -102,36 +102,44 @@ class OpenAIUtils:
             self.logger.error(f"Failed to create image at {output_path}: {e}")
             raise
 
-    # !--- New Method for Summarization ---!
-    def summarize_text_with_openai(self, text_to_summarize: str, target_max_tokens: int, model: str = "gpt-4o-mini"):
+    def summarize_text_with_openai(self, text_to_summarize: str, target_max_tokens: int, tokenizer: T5Tokenizer, model: str = "gpt-4o-mini"):
         """
-        Summarizes the input text using the specified OpenAI model to be
-        around the target token length, focusing on key themes and details.
+        Summarizes the input text using the specified OpenAI model to fit precisely within the target token count,
+        preserving key themes and details for image generation.
 
         Args:
             text_to_summarize (str): The long text prompt to summarize.
-            target_max_tokens (int): The desired maximum token count for the summary (e.g., 75 for CLIP).
-            model (str): The OpenAI model to use for summarization.
+            target_max_tokens (int): The desired maximum token count for the summary (e.g., 510 for T5-base).
+            tokenizer (T5Tokenizer): The tokenizer to count tokens (T5-base tokenizer).
+            model (str): The OpenAI model to use for summarization (default: "gpt-4o-mini").
 
         Returns:
-            str: The summarized text, or the original text if summarization fails or is not needed.
+            str: The summarized text, guaranteed to be within target_max_tokens.
         """
-        self.logger.info(f"Requesting summarization for text (first 100 chars): {text_to_summarize[:100]}...")
-        self.logger.debug(f"Target max tokens for summary: {target_max_tokens}")
+        self.logger.info(f"Summarizing text (first 100 chars): {text_to_summarize[:100]}...")
+        self.logger.debug(f"Target max tokens: {target_max_tokens}")
 
-        # Estimate word count for summary length hint (very approximate)
-        # Aim for slightly fewer tokens than the max to be safe
-        estimated_word_count = int(target_max_tokens * 0.6) # Rough estimate
+        # Count initial tokens
+        initial_token_ids = tokenizer(text_to_summarize, max_length=target_max_tokens + 100, truncation=False)["input_ids"]
+        initial_token_count = len(initial_token_ids)
+        self.logger.debug(f"Initial token count: {initial_token_count}")
+
+        if initial_token_count <= target_max_tokens:
+            self.logger.info("Text is already within token limit. No summarization needed.")
+            return text_to_summarize
+
+        # Estimate word count for initial summary (approximate, refined later)
+        estimated_word_count = int(target_max_tokens * 0.6)  # Rough estimate, assuming ~1.67 words per token
 
         system_prompt = (
             "You are an expert text summarizer. Your goal is to condense the provided text while preserving "
             "the core subject, key descriptive details, style, and any specific instructions for image generation. "
-            "Avoid adding any conversational text or explanations. Output only the summarized text."
+            "Output only the summarized text, with no additional explanations or formatting."
         )
         user_prompt = (
-            f"Summarize the following text to be concise, ideally under {target_max_tokens} tokens (around {estimated_word_count} words), "
-            f"while retaining the main subject, essential details, style, and instructions. Text:\n\n"
-            f"\"{text_to_summarize}\""
+            f"Summarize the following text to be concise, targeting around {estimated_word_count} words to fit within "
+            f"{target_max_tokens} tokens, retaining the main subject, essential details, style, and instructions. Prioritize the distinctive topics dictionary given in the text to capture its key important descriptive details."
+            f"Text:\n\n\"{text_to_summarize}\""
         )
 
         messages = [
@@ -139,53 +147,91 @@ class OpenAIUtils:
             {"role": "user", "content": user_prompt}
         ]
 
-        try:
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.2, # Lower temperature for more focused summary
-                max_tokens=target_max_tokens + 50 # Give OpenAI some buffer, we check length later
-            )
-            summary = response.choices[0].message.content.strip()
-            self.logger.info(f"OpenAI Summary received (first 100 chars): {summary[:100]}...")
-            return summary
-        except Exception as e:
-            self.logger.error(f"OpenAI summarization API call failed: {e}\n{traceback.format_exc()}")
-            # Fallback to returning original text if API fails
-            return text_to_summarize
+        max_attempts = 3
+        current_max_tokens = target_max_tokens + 20  # Initial buffer
+        summary = None
+
+        for attempt in range(max_attempts):
+            try:
+                self.logger.debug(f"Summarization attempt {attempt + 1}/{max_attempts} with max_tokens={current_max_tokens}")
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.2,  # Low temperature for focused summary
+                    max_tokens=current_max_tokens
+                )
+                summary = response.choices[0].message.content.strip()
+                summary_token_ids = tokenizer(summary, max_length=target_max_tokens + 100, truncation=False)["input_ids"]
+                summary_token_count = len(summary_token_ids)
+                self.logger.debug(f"Summary token count: {summary_token_count}")
+
+                if summary_token_count <= target_max_tokens:
+                    self.logger.info(f"Summary fits within {target_max_tokens} tokens ({summary_token_count} tokens).")
+                    return summary
+
+                # If summary is too long, reduce max_tokens and tighten prompt
+                self.logger.warning(f"Summary exceeds {target_max_tokens} tokens ({summary_token_count} tokens). Retrying...")
+                current_max_tokens = max(target_max_tokens - 10, target_max_tokens // 2)
+                estimated_word_count = int(current_max_tokens * 0.5)
+                user_prompt = (
+                    f"Summarize the following text to be very concise, targeting around {estimated_word_count} words to fit strictly within "
+                    f"{target_max_tokens} tokens, retaining only the most essential subject, details, style, and instructions. "
+                    f"Text:\n\n\"{text_to_summarize}\""
+                )
+                messages[1]["content"] = user_prompt
+
+            except Exception as e:
+                self.logger.error(f"OpenAI summarization attempt {attempt + 1} failed: {e}")
+                if attempt == max_attempts - 1:
+                    # On final attempt, fallback to truncation
+                    self.logger.error("Max summarization attempts reached. Falling back to truncation.")
+                    truncated_summary = tokenizer.decode(
+                        initial_token_ids[:target_max_tokens],
+                        skip_special_tokens=True
+                    )
+                    self.logger.info(f"Truncated summary: '{truncated_summary[:100]}...' ({len(tokenizer(truncated_summary)['input_ids'])} tokens)")
+                    return truncated_summary
+                continue
+
+        # If all attempts fail, truncate the original text
+        self.logger.error("All summarization attempts failed. Falling back to truncation.")
+        truncated_summary = tokenizer.decode(
+            initial_token_ids[:target_max_tokens],
+            skip_special_tokens=True
+        )
+        self.logger.info(f"Truncated summary: '{truncated_summary[:100]}...' ({len(tokenizer(truncated_summary)['input_ids'])} tokens)")
+        return truncated_summary
 
 # Example usage (optional, for testing the class directly)
 if __name__ == '__main__':
-    # Example: Load API key from environment variable or a config file
-    # Make sure to replace this with your actual key loading mechanism
     try:
-        # Attempt to load from environment variable first
+        # Load API key
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-             # Fallback: attempt to load from a config file
-             print("Loading API key from config file...")
-             config = load_config("/home/iris/Documents/deep_learning/config/config.yaml") # Adjust path if needed
-             api_key = config.get("openai_api_key")
-
+            config = load_config("/home/iris/Documents/deep_learning/config/config.yaml")
+            api_key = config.get("openai", {}).get("api_key")
         if not api_key:
             raise ValueError("OpenAI API key not found in environment variables or config file.")
 
         openai_util = OpenAIUtils(api_key=api_key)
+        tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
 
         long_text = "Generate an image depicting a vast, serene mountain landscape at dawn. The peaks should be snow-capped, reflecting the soft, warm light of the rising sun. A winding river should flow through the valley below, its surface like glass. Include a small, solitary cabin nestled amongst pine trees near the riverbank. The overall mood should be peaceful, awe-inspiring, and slightly mystical. Ensure high detail, sharp focus, and photorealistic quality, 8k resolution, masterpiece."
-        clip_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14") # Example tokenizer
-        clip_limit = 77
+        target_max_tokens = 510
 
-        summarized = openai_util.summarize_text_with_openai(long_text, clip_limit - 2, clip_tokenizer) # Pass tokenizer
+        summarized = openai_util.summarize_text_with_openai(
+            text_to_summarize=long_text,
+            target_max_tokens=target_max_tokens,
+            tokenizer=tokenizer
+        )
 
         print("\nOriginal Text:")
         print(long_text)
-        print(f"\nToken count (CLIP): {len(clip_tokenizer(long_text)['input_ids'])}")
+        print(f"\nToken count (T5): {len(tokenizer(long_text)['input_ids'])}")
 
         print("\nSummarized Text:")
         print(summarized)
-        print(f"\nToken count (CLIP): {len(clip_tokenizer(summarized)['input_ids'])}")
+        print(f"\nToken count (T5): {len(tokenizer(summarized)['input_ids'])}")
 
     except Exception as main_e:
         print(f"An error occurred: {main_e}")
-
