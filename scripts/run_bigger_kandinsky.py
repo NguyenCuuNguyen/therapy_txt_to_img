@@ -1,40 +1,25 @@
 import os
 import logging
 import yaml
-import json
 import gc
 import torch
 import traceback
-import shutil # For copying best model directory
+import shutil
 from itertools import product
-
+from sklearn.model_selection import KFold
+from torch.utils.data import Subset
 from bigger_kandinsky import FinetuneModel
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-
-# Import the modified FinetuneModel class
-try:
-    # Make sure the filename matches where you saved the class
-    # Assuming it's named 'finetune_model_accelerate.py' based on previous context
-    from bigger_kandinsky import FinetuneModel
-except ImportError:
-     # Use standard logging here as accelerate logger might not be ready
-     logging.error("Could not import FinetuneModel from finetune_model_accelerate.py")
-     # Define dummy class
-     class FinetuneModel:
-         def __init__(self, *args, **kwargs): pass
-         def load_model_components(self): pass
-         def modify_architecture(self, *args, **kwargs): pass
-         def fine_tune(self, *args, **kwargs): pass
-         def save_model_state(self, *args, **kwargs): pass
+from src.utils.dataset import load_dataset
+import numpy as np
 
 def load_config(config_path):
     """Load configuration from YAML file."""
-    # Use standard logger temporarily before accelerate logger is fully set up in main
     temp_logger = logging.getLogger(__name__ + ".config_loader")
-    temp_logger.propagate = False # Prevent duplicate logging if root logger gets configured later
-    temp_logger.addHandler(logging.StreamHandler()) # Log config loading errors to console
+    temp_logger.propagate = False
+    temp_logger.addHandler(logging.StreamHandler())
     temp_logger.setLevel(logging.INFO)
     try:
         with open(config_path, 'r') as f:
@@ -46,198 +31,178 @@ def load_config(config_path):
         raise
 
 def run_finetune(config_path):
-    """Run finetuning for multiple models, epochs, and hyperparameters."""
-    # --- Accelerator Setup ---
-    # Load config first to get accumulation steps if defined there
+    """Run finetuning with k-fold cross-validation to find the best hyperparameters."""
     config_temp = load_config(config_path)
-    if config_temp is None: return # Exit if config fails
+    if config_temp is None: return
     gradient_accumulation_steps = config_temp.get("gradient_accumulation_steps", 4)
 
-    # !--- Instantiate Accelerator Correctly ---!
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
-        mixed_precision='fp16', # Or 'bf16'
-        log_with=None # Disable default trackers unless configured
+        mixed_precision='fp16',
+        log_with=None
     )
 
-    # --- Setup Logging AFTER Accelerator Init ---
-    # Use accelerate's logger from now on
     logger = get_logger(__name__, log_level="DEBUG")
-
-    # Log accelerator state using accelerator's print for multi-process safety
-    # or log only on main process
     if accelerator.is_main_process:
         logger.info(accelerator.state)
-    # Alternatively, print on all processes for debugging:
-    # accelerator.print(f"Accelerator state: {accelerator.state}")
 
-        # --- Configure File Handler (Only on Main Process) ---
     if accelerator.is_main_process:
-        log_file_path = "/home/iris/Documents/deep_learning/src/logs/run_bigger_kandinsky_accelerate.log" # Define log path
+        log_file_path = "/home/iris/Documents/deep_learning/src/logs/run_bigger_kandinsky_accelerate.log"
         log_dir = os.path.dirname(log_file_path)
         try:
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir)
-                print(f"Created log directory: {log_dir}")
-
+            os.makedirs(log_dir, exist_ok=True)
             file_handler = logging.FileHandler(log_file_path, mode='w')
             file_handler.setLevel("DEBUG")
             file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
             file_handler.setFormatter(file_formatter)
-            # Add handler to the logger obtained from accelerate
-            logger.addHandler(file_handler)
+            logging.getLogger().addHandler(file_handler)
             logger.info(f"File logging configured to: {log_file_path}")
         except Exception as e:
-            # Use print as logger might not have console handler yet if file handler failed
             print(f"ERROR: Failed to configure file logging: {e}")
     logger.info(accelerator.state, main_process_only=True)
-    # set_seed(42) # Optional: Set seed for reproducibility across processes
+    set_seed(42)
 
-    # --- Initialize Tracking for Best Hyperparameters ---
-    overall_best_val_loss = float('inf')
-    best_hyperparam_details = None # Will store {'config_idx': idx, 'hyperparams': dict, 'checkpoint_path': path, 'val_loss': float}
-    last_run_details = None # Will store {'config_idx': idx, 'hyperparams': dict, 'checkpoint_path': path, 'epoch': int}
+    overall_best_val_loss = -1
+    best_config = None  # Track the best configuration details
+    save_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky"
 
     try:
         config = load_config(config_path)
         dataset_path = config.get("dataset_path", "/home/iris/Documents/deep_learning/data/finetune_dataset/coco/dataset.json")
         if not os.path.exists(dataset_path):
-            logger.error(f"Dataset JSON file not found at: {dataset_path}")
+            logger.error(f"Dataset not found: {dataset_path}")
             return
-        
-        base_output_dir = config.get("base_output_dir", "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky")
-        if accelerator.is_main_process: os.makedirs(base_output_dir, exist_ok=True)
-        
-        # Define models to train
-        models_to_train = [
-            # ("sdxl", os.path.join(base_output_dir, "sdxl")),
-            ("kandinsky", os.path.join(base_output_dir, "kandinsky")),
-            # ("karlo", os.path.join(base_output_dir, "karlo"))
-        ]
-        
-        # Hyperparameter configurations
-        # More structured way to define hyperparameters to test
+
+        base_output_dir = config.get("base_output_dir", "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky")
+        if accelerator.is_main_process:
+            os.makedirs(base_output_dir, exist_ok=True)
+
+        models_to_train = config.get("models_to_train", ["kandinsky"])
+        logger.info(f"Models selected for training: {models_to_train}", main_process_only=True)
+
         param_grid = {
-            'learning_rate': [1e-5, 5e-6, 2e-6],
-            'lora_r': [4, 8, 16],
-            'apply_lora_unet': [True], # Assuming always true for this experiment
-            'epochs': [5, 10, 15], # Keep epochs fixed for fair comparison, or add to grid
-            'batch_size': [1,2,5],
-            'val_split': [0.2]
+            'learning_rate': config.get("learning_rates", [0.001, 0.0001, 0.01, 0.00001]),
+            'lora_r': config.get("lora_ranks", [4, 8, 16]),
+            'apply_lora_unet': config.get("apply_lora_unets", [True]),
+            'epochs': config.get("hyperparam_epochs", [5, 10, 15]),
+            'batch_size': config.get("hyperparam_batch_size", [1])
         }
         keys, values = zip(*param_grid.items())
         hyperparam_configs = [dict(zip(keys, v)) for v in product(*values)]
         logger.info(f"Generated {len(hyperparam_configs)} hyperparameter configurations to test.", main_process_only=True)
-        # ------------------------------------
 
-        for model_name, base_output_dir in models_to_train:
-            output_dir = base_output_dir
+        full_dataset = load_dataset(dataset_path)
+        if full_dataset is None:
+            logger.error("Failed to load dataset")
+            return
+
+        k_folds = config.get("k_folds", 5)
+        kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+        train_val_splits = [(Subset(full_dataset, train_idx), Subset(full_dataset, val_idx)) for train_idx, val_idx in kf.split(range(len(full_dataset)))]
+
+        for model_name in models_to_train:
+            model_base_output_dir = base_output_dir
             logger.info(f"========== Starting Pipeline for: {model_name} ==========", main_process_only=True)
 
-            # Reset best for this model
-            overall_best_val_loss = float('inf')
-            best_hyperparam_details = None
-            last_run_details = None
+            overall_best_val_loss = -1
+            best_config = None
 
             for idx, hyperparams in enumerate(hyperparam_configs):
                 config_name = f"hyperparam_config_{idx}"
-                logger.info(f"--- Hyperparameter Config {idx+1}/{len(hyperparam_configs)} ---")
-                hyperparam_dir = os.path.join(output_dir, f"hyperparam_config_{idx}")
-                if accelerator.is_main_process: os.makedirs(hyperparam_dir, exist_ok=True)
+                logger.info(f"--- Running Hyperparameter Config {idx+1}/{len(hyperparam_configs)} ({config_name}) ---", main_process_only=True)
+                logger.info(f"Hyperparameters: {hyperparams}", main_process_only=True)
+
+                hyperparam_dir = os.path.join(model_base_output_dir, config_name)
+                if accelerator.is_main_process:
+                    try:
+                        os.makedirs(hyperparam_dir, exist_ok=True)
+                        logger.info(f"Created temporary directory: {hyperparam_dir}")
+                    except Exception as e:
+                        logger.error(f"Failed to create temporary directory {hyperparam_dir}: {e}")
+
                 finetuner = None
                 try:
                     finetuner = FinetuneModel(model_name, hyperparam_dir, accelerator, logger_instance=logger)
                     finetuner.load_model()
-                    finetuner.modify_architecture(
-                        # apply_lora_to_text_encoder=hyperparams['apply_lora_text_encoder'],
-                        apply_lora_to_unet=hyperparams['apply_lora_unet']
-                    )
-                    current_run_best_val_loss = finetuner.fine_tune(
+                    finetuner.modify_architecture(apply_lora_to_unet=hyperparams.get('apply_lora_unet', True))
+                    avg_val_loss, model_state, hyperparameters, best_epoch = finetuner.fine_tune(
                         dataset_path=dataset_path,
-                        epochs=hyperparams.get('epochs', 1),
+                        train_val_splits=train_val_splits,
+                        epochs=hyperparams.get('epochs', 5),
                         batch_size=hyperparams.get('batch_size', 1),
-                        learning_rate=hyperparams.get('learning_rate', 1e-5),
-                        val_split=hyperparams.get('val_split', 0.2),
+                        learning_rate=float(hyperparams.get('learning_rate', 1e-5)),
                         gradient_accumulation_steps=gradient_accumulation_steps
                     )
-                    logger.info(f"Completed finetuning for {model_name} with hyperparameter config {idx+1}.")
-                    current_run_best_epoch = finetuner.best_epoch # Get best epoch from this run
-                    current_run_last_epoch = finetuner.current_epoch # Get last epoch from this run
-                    logger.info(f"Completed run {idx+1}. Best Val Loss for this run: {current_run_best_val_loss:.4f} at epoch {current_run_best_epoch}", main_process_only=True)
+                    logger.info(f"Completed run {idx+1}. Avg Val Loss across folds: {avg_val_loss:.4f}", main_process_only=True)
 
-                    # --- Track Overall Best ---
-                    if current_run_best_val_loss < overall_best_val_loss:
-                        overall_best_val_loss = current_run_best_val_loss
-                        best_hyperparam_details = {
-                            'config_idx': idx,
-                            'hyperparams': hyperparams,
-                            # Path to the directory saved by fine_tune's internal best checkpointing
-                            'checkpoint_path': os.path.join(hyperparam_dir, f"best_epoch_{current_run_best_epoch}"),
-                            'val_loss': current_run_best_val_loss,
-                            'epoch': current_run_best_epoch
-                        }
-                        logger.info(f"*** New overall best validation loss found: {overall_best_val_loss:.4f} (Config {idx}) ***", main_process_only=True)
+                    if accelerator.is_main_process:
+                        if model_state and not np.isnan(avg_val_loss) and (overall_best_val_loss == -1 or avg_val_loss < overall_best_val_loss):
+                            overall_best_val_loss = avg_val_loss
+                            best_config = {
+                                'index': idx,
+                                'hyperparameters': hyperparams,
+                                'avg_val_loss': avg_val_loss,
+                                'epoch': best_epoch
+                            }
+                            logger.info(f"*** New global best validation loss found: {overall_best_val_loss:.4f} (Config {idx}, Epoch {best_epoch}) ***", main_process_only=True)
+                            logger.info(f"Best configuration updated: {best_config}", main_process_only=True)
 
-                    # --- Track Last Run Details ---
-                    last_run_details = {
-                         'config_idx': idx,
-                         'hyperparams': hyperparams,
-                         'checkpoint_path': os.path.join(hyperparam_dir, f"last_epoch"), # Saved as 'last_epoch' by fine_tune
-                         'epoch': current_run_last_epoch
-                    }
+                            # Remove existing best model directory if it exists
+                            if os.path.exists(save_dir):
+                                try:
+                                    shutil.rmtree(save_dir)
+                                    logger.info(f"Removed previous best model directory: {save_dir}")
+                                except Exception as e:
+                                    logger.error(f"Failed to remove previous best model directory {save_dir}: {e}")
+
+                            # Save new best model
+                            try:
+                                os.makedirs(save_dir, exist_ok=True)
+                                logger.info(f"Created save directory: {save_dir}")
+                                finetuner.output_dir = save_dir
+                                finetuner.save_model_state(
+                                    epoch=best_epoch,
+                                    val_loss=avg_val_loss,
+                                    hyperparameters=hyperparams
+                                )
+                                logger.info(f"Saved best model and hyperparameters for config {idx} to {save_dir}")
+                            except Exception as e:
+                                logger.error(f"Failed to save best model to {save_dir}: {e}")
+                        else:
+                            reason = []
+                            if not model_state:
+                                reason.append("model_state is None")
+                            if np.isnan(avg_val_loss):
+                                reason.append("avg_val_loss is NaN")
+                            if overall_best_val_loss != -1 and avg_val_loss >= overall_best_val_loss:
+                                reason.append(f"avg_val_loss ({avg_val_loss:.4f}) not better than global best ({overall_best_val_loss:.4f})")
+                            logger.info(f"Skipped saving for config {idx}: {', '.join(reason)}", main_process_only=True)
 
                 except Exception as e:
                     logger.error(f"Run FAILED for {model_name}, {config_name}: {e}\n{traceback.format_exc()}", main_process_only=True)
 
                 finally:
-                    logger.info(f"--- Finished cleanup for {model_name}, {config_name} ---", main_process_only=True)
-                    del finetuner
-                    gc.collect(); torch.cuda.empty_cache()
-                    logger.info(f"Cleaned up resources for {model_name}, config {idx+1}.")
+                    if os.path.exists(hyperparam_dir) and accelerator.is_main_process:
+                        try:
+                            shutil.rmtree(hyperparam_dir)
+                            logger.info(f"Removed temporary directory: {hyperparam_dir}")
+                        except Exception as e:
+                            logger.error(f"Failed to remove temporary directory {hyperparam_dir}: {e}")
+                    if finetuner:
+                        del finetuner
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
-            # --- Save Overall Best and Last Models ---
-            if accelerator.is_main_process:
-                logger.info(f"--- Final Saving for Model: {model_name} ---")
-
-                # Save Last Model
-                if last_run_details and os.path.exists(last_run_details['checkpoint_path']):
-                    final_last_dir = os.path.join(output_dir, "final_last_run_model")
-                    logger.info(f"Copying last run checkpoint from {last_run_details['checkpoint_path']} to {final_last_dir}")
-                    try:
-                        shutil.copytree(last_run_details['checkpoint_path'], final_last_dir, dirs_exist_ok=True)
-                        # Save corresponding hyperparameters
-                        last_hyperparam_path = os.path.join(final_last_dir, "hyperparameters_last_run.json")
-                        with open(last_hyperparam_path, 'w') as f:
-                            json.dump(last_run_details['hyperparams'], f, indent=4)
-                        logger.info(f"Saved last run model and config to {final_last_dir}")
-                    except Exception as e:
-                        logger.error(f"Failed to copy/save last run model: {e}")
-                else:
-                    logger.warning("Could not find checkpoint for the last hyperparameter run.")
-
-                # Save Best Model
-                if best_hyperparam_details and os.path.exists(best_hyperparam_details['checkpoint_path']):
-                    final_best_dir = os.path.join(output_dir, "final_overall_best_model")
-                    logger.info(f"Copying overall best checkpoint from {best_hyperparam_details['checkpoint_path']} to {final_best_dir}")
-                    try:
-                        shutil.copytree(best_hyperparam_details['checkpoint_path'], final_best_dir, dirs_exist_ok=True)
-                        # Save corresponding hyperparameters and performance
-                        best_hyperparam_path = os.path.join(final_best_dir, "hyperparameters_overall_best.json")
-                        with open(best_hyperparam_path, 'w') as f:
-                            json.dump(best_hyperparam_details, f, indent=4, default=str) # Use default=str for safety
-                        logger.info(f"Saved overall best model and config to {final_best_dir}")
-                    except Exception as e:
-                        logger.error(f"Failed to copy/save overall best model: {e}")
-                else:
-                    logger.warning("Could not find checkpoint for the overall best hyperparameter run.")
-
+            if best_config:
+                logger.info(f"Final best configuration for {model_name}: Config {best_config['index']}, Avg Val Loss: {best_config['avg_val_loss']:.4f}, Epoch: {best_config['epoch']}, Hyperparameters: {best_config['hyperparameters']}", main_process_only=True)
+            else:
+                logger.warning(f"No valid configuration found for {model_name}", main_process_only=True)
             logger.info(f"========== Finished Pipeline for: {model_name} ==========\n", main_process_only=True)
 
     except Exception as e:
         logger.critical(f"Main execution failed: {e}\n{traceback.format_exc()}", main_process_only=True)
     finally:
         logger.info("Hyperparameter search script completed.", main_process_only=True)
-        # logging.shutdown() # Usually not needed with accelerate logger
 
 if __name__ == "__main__":
     config_path = "/home/iris/Documents/deep_learning/config/config.yaml"
