@@ -6,6 +6,7 @@ import traceback
 import numpy as np
 import json
 import math
+import copy
 import torch.nn as nn
 from accelerate import Accelerator # Import Accelerator
 from accelerate.logging import get_logger # Use accelerate logger
@@ -272,10 +273,16 @@ class FinetuneModel:
              self.logger.warning("Scheduler not available for validation.")
              return float('inf')
 
+        # --- Set to Eval Mode ---
+        # Use accelerator context manager to handle model states if they were prepared
+        # If only parts were prepared, handle manually
+        unet_is_prepared = self.unet is self.accelerator.unwrap_model(self.unet) # Check if UNet was prepared
+        proj_is_prepared = self.projection_layer is self.accelerator.unwrap_model(self.projection_layer)
 
         # Set models to eval mode
         if self.unet: self.unet.eval()
         if self.text_encoder: self.text_encoder.eval()
+        if self.projection_layer: self.projection_layer.eval()
         if hasattr(self, 'text_encoder_2') and self.text_encoder_2: self.text_encoder_2.eval() # For SDXL
         if self.vae: self.vae.eval()
 
@@ -430,61 +437,113 @@ class FinetuneModel:
         return avg_val_loss
 
 
+    # def save_model_state(self, save_type="epoch", epoch=None, val_loss=None, hyperparameters=None):
+    #     """Saves the trained LoRA weights AND the projection layer."""
+    #     if epoch is None: epoch = self.current_epoch
+    #     save_label = f"{save_type}_epoch_{epoch}"
+    #     val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) and not np.isinf(val_loss) else "N/A"
+    #     self.logger.info(f"Saving model state for {self.model_name} as '{save_label}' (Val Loss: {val_loss_str})")
+
+    #     output_subdir = os.path.join(self.output_dir, save_label)
+    #     os.makedirs(output_subdir, exist_ok=True)
+    #     save_paths = {}
+
+    #     # --- Save UNet LoRA Adapters (if they exist) ---
+    #     if self.unet and isinstance(self.unet, PeftModel): # Check if it's a PEFT model
+    #         try:
+    #             unwrapped_unet = self.accelerator.unwrap_model(self.unet) # Unwrap
+    #             unet_path = os.path.join(output_subdir, "unet_lora")
+    #             unwrapped_unet.save_pretrained(unet_path)
+    #             save_paths["UNet_LoRA"] = unet_path
+    #             self.logger.info(f"Saved UNet LoRA weights to {unet_path}")
+    #         except Exception as e:
+    #             self.logger.error(f"Failed to save UNet LoRA weights: {e}")
+    #     elif self.unet:
+    #          self.logger.info("UNet was not adapted with LoRA, skipping UNet LoRA save.")
+
+    #     # --- Save Projection Layer State Dict ---
+    #     if self.projection_layer:
+    #         try:
+    #             # Unwrap the projection layer if it was prepared by accelerate
+    #             # (It should be if it's part of params_to_optimize)
+    #             unwrapped_proj = self.accelerator.unwrap_model(self.projection_layer)
+    #             proj_path = os.path.join(output_subdir, "projection_layer.pth")
+    #             self.accelerator.save(unwrapped_proj.state_dict(), proj_path) # Use accelerator save
+    #             save_paths["ProjectionLayer"] = proj_path
+    #             self.logger.info(f"Saved Projection Layer state_dict to {proj_path}")
+    #         except Exception as e:
+    #              self.logger.error(f"Failed to save Projection Layer state_dict: {e}")
+
+    #     # --- Save Hyperparameters ---
+    #     if hyperparameters:
+    #         # Add info about which LoRA parts were applied
+    #         hyperparameters['_apply_lora_text_encoder'] = self._apply_lora_text_flag
+    #         hyperparameters['_apply_lora_unet'] = self._apply_lora_unet_flag
+    #         hyperparam_path = os.path.join(output_subdir, f"training_args_{save_label}.json")
+    #         save_data = { 'model_name': self.model_name, 'save_type': save_type, 'epoch': epoch,
+    #                       'best_epoch': self.best_epoch if save_type == 'best' else None,
+    #                       'validation_loss': val_loss if val_loss is not None else None,
+    #                       'best_validation_loss': self.best_val_loss if self.best_val_loss != float('inf') else None,
+    #                       'hyperparameters': hyperparameters }
+    #         try:
+    #             with open(hyperparam_path, 'w') as f: json.dump(save_data, f, indent=4, default=str)
+    #             self.logger.info(f"Saved training args and metrics to {hyperparam_path}")
+    #         except Exception as e: self.logger.error(f"Failed to save hyperparameters: {e}")
+
+    #     if not save_paths:
+    #          self.logger.warning(f"No trainable weights (LoRA/Projection) were saved for {self.model_name} ({save_label}).")
+
+    # !--- Modified save function ---!
     def save_model_state(self, save_type="epoch", epoch=None, val_loss=None, hyperparameters=None):
-        """Saves the trained LoRA weights AND the projection layer."""
-        if epoch is None: epoch = self.current_epoch
-        save_label = f"{save_type}_epoch_{epoch}"
+        """Saves the trained LoRA weights AND the projection layer using Accelerator."""
+        # Ensure this runs only on the main process (checked before calling)
+        if epoch is None: epoch = self.current_epoch # Use current if not specified
+
+        save_label = f"{save_type}_epoch_{epoch}" if save_type != "last" else "last_epoch" # Simpler name for last
+        if save_type == "best": save_label = f"best_epoch_{self.best_epoch}" # Use best_epoch for label
+
         val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) and not np.isinf(val_loss) else "N/A"
-        self.logger.info(f"Saving model state for {self.model_name} as '{save_label}' (Val Loss: {val_loss_str})")
+        self.logger.info(f"Saving model state for {self.model_name} as '{save_label}' (Epoch: {epoch}, Val Loss: {val_loss_str})")
 
         output_subdir = os.path.join(self.output_dir, save_label)
         os.makedirs(output_subdir, exist_ok=True)
         save_paths = {}
 
-        # --- Save UNet LoRA Adapters (if they exist) ---
-        if self.unet and isinstance(self.unet, PeftModel): # Check if it's a PEFT model
+        # --- Save UNet LoRA Adapters ---
+        if self.unet and isinstance(self.unet, PeftModel):
             try:
-                unwrapped_unet = self.accelerator.unwrap_model(self.unet) # Unwrap
+                unwrapped_unet = self.accelerator.unwrap_model(self.unet)
                 unet_path = os.path.join(output_subdir, "unet_lora")
                 unwrapped_unet.save_pretrained(unet_path)
-                save_paths["UNet_LoRA"] = unet_path
-                self.logger.info(f"Saved UNet LoRA weights to {unet_path}")
-            except Exception as e:
-                self.logger.error(f"Failed to save UNet LoRA weights: {e}")
-        elif self.unet:
-             self.logger.info("UNet was not adapted with LoRA, skipping UNet LoRA save.")
+                save_paths["UNet_LoRA"] = unet_path; self.logger.info(f"Saved UNet LoRA weights to {unet_path}")
+            except Exception as e: self.logger.error(f"Failed to save UNet LoRA: {e}")
+        elif self.unet and self._apply_lora_unet_flag: # Log only if LoRA was intended
+             self.logger.warning("UNet is not a PeftModel, cannot save LoRA adapters.")
 
         # --- Save Projection Layer State Dict ---
         if self.projection_layer:
             try:
-                # Unwrap the projection layer if it was prepared by accelerate
-                # (It should be if it's part of params_to_optimize)
                 unwrapped_proj = self.accelerator.unwrap_model(self.projection_layer)
                 proj_path = os.path.join(output_subdir, "projection_layer.pth")
-                self.accelerator.save(unwrapped_proj.state_dict(), proj_path) # Use accelerator save
-                save_paths["ProjectionLayer"] = proj_path
-                self.logger.info(f"Saved Projection Layer state_dict to {proj_path}")
-            except Exception as e:
-                 self.logger.error(f"Failed to save Projection Layer state_dict: {e}")
+                self.accelerator.save(unwrapped_proj.state_dict(), proj_path)
+                save_paths["ProjectionLayer"] = proj_path; self.logger.info(f"Saved Projection Layer state_dict to {proj_path}")
+            except Exception as e: self.logger.error(f"Failed to save Projection Layer: {e}")
 
         # --- Save Hyperparameters ---
         if hyperparameters:
-            # Add info about which LoRA parts were applied
-            hyperparameters['_apply_lora_text_encoder'] = self._apply_lora_text_flag
-            hyperparameters['_apply_lora_unet'] = self._apply_lora_unet_flag
+            hyperparameters['_apply_lora_text_encoder'] = self._apply_lora_text_flag; hyperparameters['_apply_lora_unet'] = self._apply_lora_unet_flag
             hyperparam_path = os.path.join(output_subdir, f"training_args_{save_label}.json")
-            save_data = { 'model_name': self.model_name, 'save_type': save_type, 'epoch': epoch,
-                          'best_epoch': self.best_epoch if save_type == 'best' else None,
-                          'validation_loss': val_loss if val_loss is not None else None,
-                          'best_validation_loss': self.best_val_loss if self.best_val_loss != float('inf') else None,
+            save_data = { 'model_name': self.model_name, 'save_type': save_type, 'saved_epoch': epoch,
+                          'best_epoch': self.best_epoch if self.best_epoch != -1 else None,
+                          'validation_loss_at_save': val_loss_str,
+                          'best_validation_loss_so_far': f"{self.best_val_loss:.4f}" if self.best_val_loss != float('inf') else "N/A",
                           'hyperparameters': hyperparameters }
             try:
                 with open(hyperparam_path, 'w') as f: json.dump(save_data, f, indent=4, default=str)
-                self.logger.info(f"Saved training args and metrics to {hyperparam_path}")
+                self.logger.info(f"Saved training args to {hyperparam_path}")
             except Exception as e: self.logger.error(f"Failed to save hyperparameters: {e}")
 
-        if not save_paths:
-             self.logger.warning(f"No trainable weights (LoRA/Projection) were saved for {self.model_name} ({save_label}).")
+        if not save_paths: self.logger.warning(f"No trainable weights were saved for {self.model_name} ({save_label}).")
 
     # Inside FinetuneModel class in finetune_model_accelerate.py
 
@@ -539,7 +598,7 @@ class FinetuneModel:
                 'apply_lora_text_encoder': self._apply_lora_text_flag,
                 'apply_lora_unet': self._apply_lora_unet_flag
             }
-            
+
             # --- Prepare with Accelerator ---
             self.logger.info("Preparing components with Accelerator...")
             if models_to_prep and optimizer:
@@ -667,7 +726,9 @@ class FinetuneModel:
 
                 # --- End of Epoch ---
                 avg_train_loss = total_train_loss / num_train_batches if num_train_batches > 0 else float('nan')
-                self.logger.info(f"--- Epoch {self.current_epoch} Finished --- Avg Train Loss: {avg_train_loss:.4f}")
+                # !--- Corrected Epoch Logging ---!
+                self.logger.info(f"--- Epoch {self.current_epoch} Finished ---")
+                self.logger.info(f"Average Train Loss: {avg_train_loss:.4f}")
 
                 # --- Validation ---
                 if val_dataloader:
@@ -675,21 +736,56 @@ class FinetuneModel:
                     avg_val_loss = avg_train_loss
                 else: avg_val_loss = avg_train_loss
 
-                # --- Checkpointing ---
+                # --- Checkpointing Logic ---
                 if not np.isnan(avg_val_loss) and avg_val_loss < self.best_val_loss:
-                    self.best_val_loss = avg_val_loss; self.best_epoch = self.current_epoch
-                    self.logger.info(f"New best loss: {avg_val_loss:.4f}. Saving 'best' checkpoint.")
-                    if self.accelerator.is_main_process: self.save_model_state(save_type="best", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
+                    self.best_val_loss = avg_val_loss
+                    self.best_epoch = self.current_epoch
+                    self.logger.info(f"New best validation loss: {avg_val_loss:.4f} (Epoch {self.best_epoch}). Storing state.")
+                    # Store the state dicts of the best model in memory
+                    # Ensure unwrapping happens correctly if models are prepared
+                    best_model_state = {}
+                    if self.unet and isinstance(self.unet, PeftModel):
+                         # Use .state_dict() on the unwrapped model to get only LoRA weights
+                         best_model_state['unet'] = copy.deepcopy(self.accelerator.unwrap_model(self.unet).state_dict())
+                    if self.projection_layer:
+                         best_model_state['projection'] = copy.deepcopy(self.accelerator.unwrap_model(self.projection_layer).state_dict())
+                # --- End Checkpointing Logic ---
 
                 gc.collect(); torch.cuda.empty_cache()
+            self.logger.info(f"Finished training {epochs} epochs.")
             # --- End Training Loop ---
 
-            self.logger.info(f"Finished training. Best loss: {self.best_val_loss:.4f} at epoch {self.best_epoch}")
-            self.logger.info(f"Saving final weights from last epoch ({self.current_epoch})...")
-            if self.accelerator.is_main_process: self.save_model_state(save_type="last", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
+            # --- Save Last Model State ---
+            if self.accelerator.is_main_process:
+                # Calculate final avg train loss if needed for saving metadata
+                final_avg_train_loss = avg_train_loss # Use the last calculated avg_train_loss
+                self.logger.info(f"Saving final model state from epoch {self.current_epoch}...")
+                self.save_model_state(save_type="last", epoch=self.current_epoch, val_loss=None, hyperparameters=hyperparameters) # Pass None for val_loss
+
+            # --- Save Best Model State (if found) ---
+            if self.best_epoch != -1 and best_model_state is not None:
+                self.logger.info(f"Restoring and saving best model state from epoch {self.best_epoch} (Loss: {self.best_val_loss:.4f})...")
+                # Load the best state back into the models before saving
+                if 'unet' in best_model_state and self.unet and isinstance(self.unet, PeftModel):
+                    self.accelerator.unwrap_model(self.unet).load_state_dict(best_model_state['unet'])
+                if 'projection' in best_model_state and self.projection_layer:
+                    self.accelerator.unwrap_model(self.projection_layer).load_state_dict(best_model_state['projection'])
+
+                # Save the restored best state
+                if self.accelerator.is_main_process:
+                    self.save_model_state(save_type="best", epoch=self.best_epoch, val_loss=self.best_val_loss, hyperparameters=hyperparameters)
+            elif val_dataloader:
+                 self.logger.warning("No best model checkpoint saved (validation loss did not improve).")
+            else:
+                 self.logger.info("No validation performed, skipping save of 'best' model.")
+
 
         except Exception as e: self.logger.error(f"Fine-tuning failed: {e}\n{traceback.format_exc()}"); raise
         finally: self.logger.info("Cleaning up..."); gc.collect(); torch.cuda.empty_cache()
+
+        # !--- Return the best validation loss found during this run ---!
+        return self.best_val_loss
+
 
     # --- (save_model_state needs to handle unwrapping projection layer too) ---
     # --- (Need to implement validate_t5 or remove validation logic) ---

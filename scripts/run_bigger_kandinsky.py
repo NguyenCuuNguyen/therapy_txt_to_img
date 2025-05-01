@@ -4,19 +4,14 @@ import yaml
 import json
 import gc
 import torch
+import traceback
+import shutil # For copying best model directory
+from itertools import product
+
 from bigger_kandinsky import FinetuneModel
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-
-# # Configure logging
-# logging.basicConfig(
-#     filename='/home/iris/Documents/deep_learning/src/logs/run_bigger_kandinsky.log',
-#     level=logging.DEBUG,
-#     format='%(asctime)s %(message)s',
-#     filemode='w',
-# )
-# logger = logging.getLogger(__name__)
 
 # Import the modified FinetuneModel class
 try:
@@ -95,8 +90,14 @@ def run_finetune(config_path):
         except Exception as e:
             # Use print as logger might not have console handler yet if file handler failed
             print(f"ERROR: Failed to configure file logging: {e}")
-
+    logger.info(accelerator.state, main_process_only=True)
     # set_seed(42) # Optional: Set seed for reproducibility across processes
+
+    # --- Initialize Tracking for Best Hyperparameters ---
+    overall_best_val_loss = float('inf')
+    best_hyperparam_details = None # Will store {'config_idx': idx, 'hyperparams': dict, 'checkpoint_path': path, 'val_loss': float}
+    last_run_details = None # Will store {'config_idx': idx, 'hyperparams': dict, 'checkpoint_path': path, 'epoch': int}
+
     try:
         config = load_config(config_path)
         dataset_path = config.get("dataset_path", "/home/iris/Documents/deep_learning/data/finetune_dataset/coco/dataset.json")
@@ -115,28 +116,31 @@ def run_finetune(config_path):
         ]
         
         # Hyperparameter configurations
-        hyperparam_configs = [
-            {
-                'epochs': 5,
-                'batch_size': 1,
-                'learning_rate': 1e-5,
-                'val_split': 0.2,
-                'apply_lora_to_text_encoder': True,
-                'apply_lora_to_unet': True
-            },
-            {
-                'epochs': 5,
-                'batch_size': 1,
-                'learning_rate': 5e-6,
-                'val_split': 0.2,
-                'apply_lora_to_text_encoder': True,
-                'apply_lora_to_unet': True
-            }
-        ]
-        
-        for model_name, output_dir in models_to_train:
-            logger.info(f"========== Starting Pipeline for: {model_name} ==========")
+        # More structured way to define hyperparameters to test
+        param_grid = {
+            'learning_rate': [1e-5, 5e-6, 2e-6],
+            'lora_r': [4, 8, 16],
+            'apply_lora_unet': [True], # Assuming always true for this experiment
+            'epochs': [5, 10, 15], # Keep epochs fixed for fair comparison, or add to grid
+            'batch_size': [1,2,5],
+            'val_split': [0.2]
+        }
+        keys, values = zip(*param_grid.items())
+        hyperparam_configs = [dict(zip(keys, v)) for v in product(*values)]
+        logger.info(f"Generated {len(hyperparam_configs)} hyperparameter configurations to test.", main_process_only=True)
+        # ------------------------------------
+
+        for model_name, base_output_dir in models_to_train:
+            output_dir = os.path.join(base_output_dir, model_name)
+            logger.info(f"========== Starting Pipeline for: {model_name} ==========", main_process_only=True)
+
+            # Reset best for this model
+            overall_best_val_loss = float('inf')
+            best_hyperparam_details = None
+            last_run_details = None
+
             for idx, hyperparams in enumerate(hyperparam_configs):
+                config_name = f"hyperparam_config_{idx}"
                 logger.info(f"--- Hyperparameter Config {idx+1}/{len(hyperparam_configs)} ---")
                 hyperparam_dir = os.path.join(output_dir, f"hyperparam_config_{idx}")
                 if accelerator.is_main_process: os.makedirs(hyperparam_dir, exist_ok=True)
@@ -145,47 +149,95 @@ def run_finetune(config_path):
                     finetuner = FinetuneModel(model_name, hyperparam_dir, accelerator, logger_instance=logger)
                     finetuner.load_model()
                     finetuner.modify_architecture(
-                        apply_lora_to_text_encoder=hyperparams['apply_lora_to_text_encoder'],
-                        apply_lora_to_unet=hyperparams['apply_lora_to_unet']
+                        # apply_lora_to_text_encoder=hyperparams['apply_lora_text_encoder'],
+                        apply_lora_to_unet=hyperparams['apply_lora_unet']
                     )
-                    finetuner.fine_tune(
+                    current_run_best_val_loss = finetuner.fine_tune(
                         dataset_path=dataset_path,
-                        epochs=hyperparams['epochs'],
-                        batch_size=hyperparams['batch_size'],
-                        learning_rate=hyperparams['learning_rate'],
-                        val_split=hyperparams['val_split'],
+                        epochs=hyperparams.get('epochs', 1),
+                        batch_size=hyperparams.get('batch_size', 1),
+                        learning_rate=hyperparams.get('learning_rate', 1e-5),
+                        val_split=hyperparams.get('val_split', 0.2),
                         gradient_accumulation_steps=gradient_accumulation_steps
                     )
                     logger.info(f"Completed finetuning for {model_name} with hyperparameter config {idx+1}.")
+                    current_run_best_epoch = finetuner.best_epoch # Get best epoch from this run
+                    current_run_last_epoch = finetuner.current_epoch # Get last epoch from this run
+                    logger.info(f"Completed run {idx+1}. Best Val Loss for this run: {current_run_best_val_loss:.4f} at epoch {current_run_best_epoch}", main_process_only=True)
+
+                    # --- Track Overall Best ---
+                    if current_run_best_val_loss < overall_best_val_loss:
+                        overall_best_val_loss = current_run_best_val_loss
+                        best_hyperparam_details = {
+                            'config_idx': idx,
+                            'hyperparams': hyperparams,
+                            # Path to the directory saved by fine_tune's internal best checkpointing
+                            'checkpoint_path': os.path.join(hyperparam_dir, f"best_epoch_{current_run_best_epoch}"),
+                            'val_loss': current_run_best_val_loss,
+                            'epoch': current_run_best_epoch
+                        }
+                        logger.info(f"*** New overall best validation loss found: {overall_best_val_loss:.4f} (Config {idx}) ***", main_process_only=True)
+
+                    # --- Track Last Run Details ---
+                    last_run_details = {
+                         'config_idx': idx,
+                         'hyperparams': hyperparams,
+                         'checkpoint_path': os.path.join(hyperparam_dir, f"last_epoch"), # Saved as 'last_epoch' by fine_tune
+                         'epoch': current_run_last_epoch
+                    }
+
                 except Exception as e:
-                    logger.error(f"Finetuning failed for {model_name}, config {idx+1}: {e}")
+                    logger.error(f"Run FAILED for {model_name}, {config_name}: {e}\n{traceback.format_exc()}", main_process_only=True)
+
                 finally:
-                    if finetuner:
-                        try: del finetuner.model
-                        except AttributeError: pass
-                        try: del finetuner.tokenizer
-                        except AttributeError: pass
-                        try: del finetuner.tokenizer_2
-                        except AttributeError: pass
-                        try: del finetuner.text_encoder
-                        except AttributeError: pass
-                        try: del finetuner.text_encoder_2
-                        except AttributeError: pass
-                        try: del finetuner.unet
-                        except AttributeError: pass
-                        try: del finetuner.scheduler
-                        except AttributeError: pass
-                        try: del finetuner.vae
-                        except AttributeError: pass
-                        del finetuner
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    logger.info(f"--- Finished cleanup for {model_name}, {config_name} ---", main_process_only=True)
+                    del finetuner
+                    gc.collect(); torch.cuda.empty_cache()
                     logger.info(f"Cleaned up resources for {model_name}, config {idx+1}.")
-            logger.info(f"========== Finished Pipeline for: {model_name} ==========\n")
+
+            # --- Save Overall Best and Last Models ---
+            if accelerator.is_main_process:
+                logger.info(f"--- Final Saving for Model: {model_name} ---")
+
+                # Save Last Model
+                if last_run_details and os.path.exists(last_run_details['checkpoint_path']):
+                    final_last_dir = os.path.join(output_dir, "final_last_run_model")
+                    logger.info(f"Copying last run checkpoint from {last_run_details['checkpoint_path']} to {final_last_dir}")
+                    try:
+                        shutil.copytree(last_run_details['checkpoint_path'], final_last_dir, dirs_exist_ok=True)
+                        # Save corresponding hyperparameters
+                        last_hyperparam_path = os.path.join(final_last_dir, "hyperparameters_last_run.json")
+                        with open(last_hyperparam_path, 'w') as f:
+                            json.dump(last_run_details['hyperparams'], f, indent=4)
+                        logger.info(f"Saved last run model and config to {final_last_dir}")
+                    except Exception as e:
+                        logger.error(f"Failed to copy/save last run model: {e}")
+                else:
+                    logger.warning("Could not find checkpoint for the last hyperparameter run.")
+
+                # Save Best Model
+                if best_hyperparam_details and os.path.exists(best_hyperparam_details['checkpoint_path']):
+                    final_best_dir = os.path.join(output_dir, "final_overall_best_model")
+                    logger.info(f"Copying overall best checkpoint from {best_hyperparam_details['checkpoint_path']} to {final_best_dir}")
+                    try:
+                        shutil.copytree(best_hyperparam_details['checkpoint_path'], final_best_dir, dirs_exist_ok=True)
+                        # Save corresponding hyperparameters and performance
+                        best_hyperparam_path = os.path.join(final_best_dir, "hyperparameters_overall_best.json")
+                        with open(best_hyperparam_path, 'w') as f:
+                            json.dump(best_hyperparam_details, f, indent=4, default=str) # Use default=str for safety
+                        logger.info(f"Saved overall best model and config to {final_best_dir}")
+                    except Exception as e:
+                        logger.error(f"Failed to copy/save overall best model: {e}")
+                else:
+                    logger.warning("Could not find checkpoint for the overall best hyperparameter run.")
+
+            logger.info(f"========== Finished Pipeline for: {model_name} ==========\n", main_process_only=True)
+
     except Exception as e:
-        logger.critical(f"Main execution failed: {e}")
-    logger.info("Multi-epoch finetuning script completed.")
+        logger.critical(f"Main execution failed: {e}\n{traceback.format_exc()}", main_process_only=True)
+    finally:
+        logger.info("Hyperparameter search script completed.", main_process_only=True)
+        # logging.shutdown() # Usually not needed with accelerate logger
 
 if __name__ == "__main__":
     config_path = "/home/iris/Documents/deep_learning/config/config.yaml"
