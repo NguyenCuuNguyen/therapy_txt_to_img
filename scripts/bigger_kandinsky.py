@@ -6,7 +6,6 @@ import traceback
 import numpy as np
 import json
 import math
-import shutil
 import copy
 import torch.nn as nn
 import warnings
@@ -34,7 +33,6 @@ from PIL import Image
 import gc
 from src.utils.dataset import load_dataset, CocoFinetuneDataset
 from bitsandbytes.optim import AdamW8bit
-import numpy as np
 
 # Suppress torch.cuda.amp.GradScaler deprecation warning
 warnings.filterwarnings("ignore", category=FutureWarning, module="accelerate")
@@ -340,7 +338,8 @@ class FinetuneModel:
 
         save_label = "best"
         val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) and not np.isinf(val_loss) else "N/A"
-        self.logger.info(f"Saving model state for {self.model_name} as '{save_label}' (Epoch: {epoch}, Val Loss: {val_loss_str})")
+        self.logger.info(f"Saving model state for {self.model_name} as '{save_label}' (Epoch: {epoch}, Val Loss: {val_loss_str}, Hyperparameters: {hyperparameters})")
+        self.logger.info(f"Save directory: {self.output_dir}")
 
         output_subdir = self.output_dir
         try:
@@ -399,13 +398,12 @@ class FinetuneModel:
         global_best_avg_val_loss = -1
         global_best_model_state = None
         global_best_hyperparameters = None
-        global_best_epoch = -1
+        global_best_epoch = epochs  # Fixed to final epoch
 
         for fold_idx, (train_dataset, val_dataset) in enumerate(train_val_splits):
             self.logger.info(f"Training fold {fold_idx + 1}/{len(train_val_splits)}")
-            self.best_val_loss = -1
-            self.best_epoch = -1
-            fold_best_model_state = None
+            fold_final_val_loss = -1
+            fold_final_model_state = None
 
             try:
                 train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -611,29 +609,32 @@ class FinetuneModel:
                     avg_train_loss = total_train_loss / num_train_batches if num_train_batches > 0 else float('nan')
                     self.logger.info(f"--- Epoch {self.current_epoch} Finished --- Avg Train Loss: {avg_train_loss:.4f}")
 
-                    avg_val_loss = -1
-                    if val_dataloader:
-                        avg_val_loss = self.validate(val_dataloader, dataset_path)
-                    else:
-                        self.logger.info("Skipping validation (no validation set).")
-                        avg_val_loss = avg_train_loss
-
-                    if not np.isnan(avg_val_loss) and (self.best_val_loss == -1 or avg_val_loss < self.best_val_loss):
-                        self.best_val_loss = avg_val_loss
-                        self.best_epoch = self.current_epoch
-                        self.logger.info(f"New best validation loss for fold {fold_idx + 1}: {avg_val_loss:.4f} (Epoch {self.best_epoch}). Storing state.")
-                        fold_best_model_state = {}
-                        if self.unet and isinstance(self.unet, PeftModel):
-                            fold_best_model_state['unet'] = copy.deepcopy(self.accelerator.unwrap_model(self.unet).state_dict())
-                        if self.projection_layer:
-                            fold_best_model_state['projection'] = copy.deepcopy(self.accelerator.unwrap_model(self.projection_layer).state_dict())
+                    # Validate only after the final epoch
+                    if self.current_epoch == epochs:
+                        avg_val_loss = -1
+                        if val_dataloader:
+                            avg_val_loss = self.validate(val_dataloader, dataset_path)
+                        else:
+                            self.logger.info("Skipping validation (no validation set).")
+                            avg_val_loss = avg_train_loss
+                        
+                        fold_final_val_loss = avg_val_loss
+                        self.logger.info(f"Fold {fold_idx + 1} validation loss after final epoch ({epochs}): {fold_final_val_loss:.4f}")
+                        
+                        # Store model state after final epoch
+                        if not np.isnan(fold_final_val_loss) and fold_final_val_loss != -1:
+                            fold_final_model_state = {}
+                            if self.unet and isinstance(self.unet, PeftModel):
+                                fold_final_model_state['unet'] = copy.deepcopy(self.accelerator.unwrap_model(self.unet).state_dict())
+                            if self.projection_layer:
+                                fold_final_model_state['projection'] = copy.deepcopy(self.accelerator.unwrap_model(self.projection_layer).state_dict())
+                            self.logger.info(f"Stored model state for fold {fold_idx + 1} after final epoch ({epochs})")
 
                     gc.collect()
                     torch.cuda.empty_cache()
 
-                valid_fold_loss = self.best_val_loss if not np.isnan(self.best_val_loss) and self.best_val_loss != -1 else -1
-                fold_val_losses.append(valid_fold_loss)
-                self.logger.info(f"Fold {fold_idx + 1} best validation loss: {valid_fold_loss:.4f}")
+                fold_val_losses.append(fold_final_val_loss)
+                self.logger.info(f"Fold {fold_idx + 1} final validation loss: {fold_final_val_loss:.4f}")
 
             except Exception as e:
                 self.logger.error(f"Fold {fold_idx + 1} failed: {e}\n{traceback.format_exc()}")
@@ -641,14 +642,13 @@ class FinetuneModel:
 
         valid_losses = [loss for loss in fold_val_losses if loss != -1]
         avg_val_loss = np.mean(valid_losses) if valid_losses else -1
-        self.logger.info(f"Average validation loss across {len(valid_losses)} valid folds: {avg_val_loss:.4f}")
+        self.logger.info(f"Average validation loss across {len(valid_losses)} valid folds after final epoch: {avg_val_loss:.4f}")
 
         if valid_losses and not np.isnan(avg_val_loss) and avg_val_loss != -1:
             global_best_avg_val_loss = avg_val_loss
-            global_best_model_state = fold_best_model_state
+            global_best_model_state = fold_final_model_state  # Use the last fold’s final state
             global_best_hyperparameters = hyperparameters
-            global_best_epoch = self.best_epoch
-            self.logger.info(f"Selected model state for saving: Avg Val Loss: {avg_val_loss:.4f} (Epoch {global_best_epoch})")
+            self.logger.info(f"Selected model state for saving: Avg Val Loss: {avg_val_loss:.4f} (Final Epoch: {global_best_epoch})")
         else:
             self.logger.warning(f"No valid model state to save. Avg Val Loss: {avg_val_loss:.4f}, Valid folds: {len(valid_losses)}")
 
