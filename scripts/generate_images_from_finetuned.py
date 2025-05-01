@@ -9,6 +9,7 @@ import re # For finding epoch numbers
 import traceback
 from pathlib import Path # For easier path handling
 from PIL import Image
+from src.utils.openai_utils import OpenAIUtils
 from diffusers import (
     StableDiffusionXLPipeline,
     StableDiffusionXLImg2ImgPipeline, # For SDXL Refiner
@@ -29,16 +30,55 @@ import math # For ceiling division
 # Global variable to cache the summarizer pipeline
 summarizer_pipeline = None
 
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("/home/iris/Documents/deep_learning/src/logs/iter2_image_generation.log", mode='w'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# --- Explicit Logging Configuration ---
+log_file_path = "/home/iris/Documents/deep_learning/src/logs/iter2_image_generation.log" # Define path clearly
+log_level = logging.INFO # Set desired level (INFO or DEBUG)
+
+# Get the root logger
+logger = logging.getLogger() # Get the root logger
+logger.setLevel(log_level) # Set the minimum level for the logger
+
+# Remove existing handlers (if any were added by libraries)
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+    handler.close()
+
+# Create File Handler
+try:
+    # Ensure log directory exists
+    log_dir = os.path.dirname(log_file_path)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+        print(f"Created log directory: {log_dir}") # Console print for confirmation
+
+    file_handler = logging.FileHandler(log_file_path, mode='w')
+    file_handler.setLevel(log_level)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s') # More detailed format
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    print(f"Logging to file: {log_file_path}") # Console print
+except Exception as e:
+    print(f"ERROR: Failed to configure file logging to {log_file_path}: {e}") # Console print error
+
+# Create Console Handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(log_level) # Log INFO and above to console
+console_formatter = logging.Formatter('%(levelname)s: %(message)s') # Simpler console format
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
+
+# --- End Logging Configuration ---
+
+# try:
+#     from src.utils.openai_utils import OpenAIUtils
+# except ImportError:
+#     logging.error("Could not import OpenAIUtils. Make sure openai_utils.py is accessible.")
+#     # Define a dummy class so the script doesn't crash immediately
+#     class OpenAIUtils:
+#         def __init__(self, *args, **kwargs): pass
+#         def summarize_text_with_openai(self, text, *args, **kwargs):
+#              logging.warning("OpenAIUtils not found, returning original text for summarization.")
+#              return text
 
 # --- Configuration ---
 def load_config(config_path):
@@ -339,7 +379,8 @@ def generate_images(
     gen_params_label, # Added label for generation hyperparams
     sample_ids, #: set,
     prompt_variations, #: dict
-    gen_hyperparams # Added generation hyperparameters
+    gen_hyperparams, # Added generation hyperparameters
+    openai_utils # Added openai_utils instance
     ):
     """
     Generates images for specified prompts and variations using the loaded pipeline(s).
@@ -361,193 +402,117 @@ def generate_images(
     """
     if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
     if model_name == "kandinsky" and prior_pipeline is None: logger.error("Kandinsky requires prior_pipeline."); return
-    # Refiner is optional for SDXL, but recommended
-    if model_name == "sdxl" and refiner_pipeline is None: logger.warning("SDXL Refiner pipeline not provided, image quality may be suboptimal.")
+    if model_name == "sdxl" and refiner_pipeline is None: logger.warning("SDXL Refiner pipeline not provided.")
     if not prompt_variations: logger.error("No prompt variations provided."); return
+    if openai_utils is None: logger.error("OpenAIUtils instance not provided."); return # Check for utils
 
-    if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
-
-    # --- Tokenizer for length check ---
-    # Get the primary tokenizer (SDXL uses tokenizer, Kandinsky uses prior's)
-    if model_name == "sdxl":
-        tokenizer_for_check = decoder_pipeline.tokenizer # SDXL's first tokenizer
-    elif model_name == "kandinsky":
-        if prior_pipeline: tokenizer_for_check = prior_pipeline.tokenizer
-        else: logger.error("Kandinsky prior pipeline missing for tokenizer check."); return
-    else:
-        # Fallback or add logic for other models if needed
-        tokenizer_for_check = decoder_pipeline.tokenizer if hasattr(decoder_pipeline, 'tokenizer') else None
-
-    if tokenizer_for_check is None:
-        logger.error(f"Could not determine tokenizer for length check for model {model_name}"); return
-
-    # --- Extract generation hyperparameters ---
-    num_inference_steps = gen_hyperparams.get("num_inference_steps", 40) # Default 40
-    guidance_scale = gen_hyperparams.get("guidance_scale", 7.5) # Default 7.5
-    # SDXL Refiner specific params
-    high_noise_frac = gen_hyperparams.get("high_noise_frac", 0.8) # Default 0.8 for refiner split
-    num_refiner_steps = gen_hyperparams.get("num_refiner_steps", 25) # Default 25 for refiner
-
-    logger.info(f"Generating images for {len(sample_ids)} specified IDs using {len(prompt_variations)} prompt variations.")
+    logger.info(f"Generating images for {len(sample_ids)} IDs using {len(prompt_variations)} variations with params: {gen_params_label}")
     img_size = 1024 if model_name == "sdxl" else 512
     device = decoder_pipeline.device
 
+    # --- Extract generation hyperparameters ---
+    num_inference_steps = gen_hyperparams.get("num_inference_steps", 40)
+    guidance_scale = gen_hyperparams.get("guidance_scale", 7.5)
+    high_noise_frac = gen_hyperparams.get("high_noise_frac", 0.8)
+    num_refiner_steps = gen_hyperparams.get("num_refiner_steps", 25)
+    k_prior_steps = gen_hyperparams.get("kandinsky_prior_steps", 25)
+    k_decoder_steps = gen_hyperparams.get("kandinsky_decoder_steps", 50)
+    k_guidance = gen_hyperparams.get("kandinsky_guidance", 4.0)
+
     # --- Quality prompt additions ---
     pos_quality_boost = ", sharp focus, highly detailed, intricate details, clear, high resolution, masterpiece, 8k"
-    neg_quality_boost = "blurry, blurred, smudged, low quality, worst quality, unclear, fuzzy, out of focus, text, words, letters, signature, watermark, username, artist name, deformed, distorted"
-    # ---
+    neg_quality_boost = "blurry, blurred, smudged, low quality, worst quality, unclear, fuzzy, out of focus, text, words, letters, signature, watermark, username, artist name, deformed, distorted, disfigured, poorly drawn, bad anatomy, extra limbs, missing limbs"
 
-    if sample_ids:
-        sample_id_list = list(sample_ids)
-        logger.debug(f"Sample file IDs to generate (first 5): {sample_id_list[:5]}")
-        if sample_id_list: logger.debug(f"Type of first sample file ID: {type(sample_id_list[0])}")
-    else: logger.warning("Sample ID list is empty!")
+    # --- Tokenizer for length check ---
+    tokenizer_for_check = None
+    if model_name == "sdxl": tokenizer_for_check = decoder_pipeline.tokenizer
+    elif model_name == "kandinsky" and prior_pipeline: tokenizer_for_check = prior_pipeline.tokenizer
+    if tokenizer_for_check is None: logger.error(f"Could not get tokenizer for {model_name}"); return
+    clip_max_length = tokenizer_for_check.model_max_length
 
     prompts_processed_count = 0
-    # --- Define Topic Columns (adjust based on your CSV) ---
-    # Exclude ID/file and potentially the concatenated details column
+    # --- Define Topic Columns ---
     all_columns = prompts_df.columns.tolist()
-    topic_columns = [col for col in all_columns if col not in ['file']] # Adjust exclusion list
-    logger.info(f"Identified {len(topic_columns)} topic columns: {topic_columns[:5]}...") # Log first few
+    topic_columns = [col for col in all_columns if col not in ['file', 'id', 'prompt_details']]
+    logger.info(f"Using columns for topic dictionary: {topic_columns}")
+    if not topic_columns: logger.error("No topic columns identified!"); return
 
     for index, row in prompts_df.iterrows():
         file_id = str(row.get('file', f'row_{index}')).strip()
-        logger.debug(f"Checking file ID: '{file_id}' (Type: {type(file_id)}) against sample_ids set.")
-        if file_id not in sample_ids: logger.debug(f"Skipping file ID '{file_id}'."); continue
+        if file_id not in sample_ids: continue
 
         prompts_processed_count += 1
         # --- Create Topic Dictionary String ---
         try:
-            # Select only the defined topic columns for the current row
-            topic_data = row[topic_columns]
-            # Convert to dictionary, dropping columns where the value is NaN/None
-            topic_dict = topic_data.dropna().to_dict()
-            # Format into string: "'key1': 'value1', 'key2': 'value2', ..."
-            # Filter out empty string values after stripping whitespace
+            topic_dict = row[topic_columns].dropna().to_dict()
             topic_string = ", ".join([f"'{k}': '{str(v).strip()}'" for k, v in topic_dict.items() if isinstance(v, str) and str(v).strip()])
-            # Add curly braces for dictionary-like appearance
-            topic_string_formatted = f"{{{topic_string}}}" if topic_string else "{}" # Represent as empty dict if no topics
-            logger.debug(f"File ID {file_id} - Topic String: {topic_string_formatted[:200]}...")
-        except Exception as e:
-            logger.error(f"Error creating topic string for file ID {file_id}: {e}")
-            continue # Skip this prompt if topics cannot be formatted
-        # ---
-
+            topic_string_formatted = f"{{{topic_string}}}" if topic_string else "{}"
+        except Exception as e: logger.error(f"Error creating topic string for {file_id}: {e}"); continue
         logger.info(f"Processing File ID: {file_id} (Row {index})")
+        logger.debug(f"  Topic String: {topic_string_formatted[:200]}...")
 
         for variation_name, prompt_template in prompt_variations.items():
             logger.info(f"  Generating for variation: {variation_name}")
-            # !--- Create output dir including gen_params label ---!
             variation_output_dir = os.path.join(output_base_dir, model_name, checkpoint_label, gen_params_label, variation_name)
             os.makedirs(variation_output_dir, exist_ok=True)
 
             try:
-                # !--- Format using the topic_string_formatted ---!
                 base_final_prompt = prompt_template.format(txt_prompt=topic_string_formatted)
-                final_prompt = base_final_prompt + pos_quality_boost
-                negative_prompt = neg_quality_boost
-            except KeyError:
-                 logger.error(f"  Template for '{variation_name}' might be missing '{{txt_prompt}}' placeholder. Using topic string directly.")
-                 # Fallback if placeholder missing
-                 final_prompt = topic_string + pos_quality_boost
-                 negative_prompt = neg_quality_boost
+                final_prompt_boosted = base_final_prompt + pos_quality_boost
+                negative_prompt_boosted = neg_quality_boost
+            except KeyError: logger.error(f"  Template missing '{{txt_prompt}}'."); continue
             except Exception as fmt_err: logger.error(f"  Error formatting prompt: {fmt_err}"); continue
-            
-            # !--- Summarize the prompt BEFORE passing to pipeline ---!
-            # Use the boosted prompt for summarization check
-            final_prompt = summarize_long_prompt(
-                final_prompt,
-                tokenizer=tokenizer_for_check, # Pass the relevant tokenizer
-                max_length=77 # CLIP's typical limit
-            )
+
+            # !--- Check length and Summarize with OpenAI if needed ---!
+            target_max_tokens = clip_max_length - 2
+            token_ids = tokenizer_for_check(final_prompt_boosted, max_length=clip_max_length, truncation=False)["input_ids"]
+
+            if len(token_ids) <= target_max_tokens:
+                prompt_to_generate = final_prompt_boosted
+                logger.debug("Prompt within length limit.")
+            else:
+                logger.warning(f"Prompt length ({len(token_ids)}) exceeds limit ({target_max_tokens}). Using OpenAI to summarize.")
+                prompt_to_generate = openai_utils.summarize_text_with_openai(
+                    final_prompt_boosted, # Summarize the full boosted prompt
+                    target_max_tokens=target_max_tokens
+                )
+                # Optional: Re-check length after summarization
+                logger.info(f"  OpenAI summary: '{prompt_to_generate}'")
+                final_token_ids = tokenizer_for_check(prompt_to_generate, max_length=clip_max_length, truncation=False)["input_ids"]
+                if len(final_token_ids) > target_max_tokens:
+                    logger.warning(f"OpenAI summary still potentially too long ({len(final_token_ids)} tokens). Will be truncated by tokenizer.")
             # !-------------------------------------------------------!
-            
-            logger.debug(f"  Formatted Prompt w/ Boosters: {final_prompt}")
-            logger.debug(f"  Negative Prompt w/ Boosters: {negative_prompt}")
+
+            logger.debug(f"  Prompt for generation: {prompt_to_generate}")
+            logger.debug(f"  Negative Prompt: {negative_prompt_boosted}")
 
             try:
                 generator = torch.Generator(device=device).manual_seed(42 + index + hash(variation_name))
                 image = None
-
                 with torch.no_grad():
+                    # --- Generation logic (SDXL with refiner, Kandinsky) ---
                     if model_name == "kandinsky":
-                        # --- Kandinsky Stage 1: Prior ---
-
-                        # Use hyperparameters for Kandinsky if specified differently, otherwise use defaults
-                        k_prior_steps = gen_hyperparams.get("kandinsky_prior_steps", 25)
-                        k_decoder_steps = gen_hyperparams.get("kandinsky_decoder_steps", 50)
-                        k_guidance = gen_hyperparams.get("kandinsky_guidance", 4.0)
-
-                        logger.debug(f"  Running Kandinsky Prior (Steps: {k_prior_steps})...")
-                        prior_output = prior_pipeline(
-                            prompt=final_prompt, # Use boosted prompt
-                            negative_prompt=negative_prompt,
-                            num_inference_steps=k_prior_steps, # Keep prior steps relatively low
-                            generator=generator
-                        )
-                        image_embeds = prior_output.image_embeds
-                        negative_image_embeds = prior_output.negative_image_embeds
-                        logger.debug("  Finished Kandinsky Prior.")
-
-                        # --- Kandinsky Stage 2: Decoder ---
-                        logger.debug("  Running Kandinsky Decoder...")
-                        image = decoder_pipeline(
-                            prompt=final_prompt, # Pass boosted prompt again
-                            image_embeds=image_embeds,
-                            negative_image_embeds=negative_image_embeds,
-                            height=img_size,
-                            width=img_size,
-                            num_inference_steps=k_decoder_steps, # Can increase decoder steps
-                            guidance_scale=k_guidance,
-                            generator=generator
-                        ).images[0]
-                        logger.debug("  Finished Kandinsky Decoder.")
+                        prior_output = prior_pipeline(prompt=prompt_to_generate, negative_prompt=negative_prompt_boosted, num_inference_steps=k_prior_steps, generator=generator)
+                        image_embeds = prior_output.image_embeds; negative_image_embeds = prior_output.negative_image_embeds
+                        image = decoder_pipeline(prompt=prompt_to_generate, image_embeds=image_embeds, negative_image_embeds=negative_image_embeds, height=img_size, width=img_size, num_inference_steps=k_decoder_steps, guidance_scale=k_guidance, generator=generator).images[0]
 
                     elif model_name == "sdxl":
-                        # --- SDXL Stage 1: Base ---
-                        logger.debug(f"  Running SDXL Base (Steps: {num_inference_steps}, Guidance: {guidance_scale}, Denoising End: {high_noise_frac if refiner_pipeline else None})...")
-                        # n_steps = 40 # Increased base steps
-                        # high_noise_frac = 0.8 # Fraction of steps for base model when using refiner
-
-                        latents = decoder_pipeline( # Use the main pipeline (decoder_pipeline var)
-                            prompt=final_prompt,
-                            negative_prompt=negative_prompt,
-                            num_inference_steps=num_inference_steps, 
-                            guidance_scale=guidance_scale, # Slightly increased guidance
-                            generator=generator,
-                            # If using refiner, output latents and potentially denoise only partially
-                            output_type="latent" if refiner_pipeline else "pil", # Output latents only if refiner exists
-                            denoising_end=high_noise_frac if refiner_pipeline else None # Stop base early if using refiner
-                        ).images # Output is latents or PIL image
-
-                        # --- SDXL Stage 2: Refiner ---
-                        if refiner_pipeline and isinstance(latents, torch.Tensor): # Check if we got latents
-                            logger.debug(f"  SDXL Base finished, latent shape: {latents.shape}. Running Refiner...")
-                            # Refiner needs the same prompt and the base latents
+                        latents = decoder_pipeline(
+                            prompt=prompt_to_generate, negative_prompt=negative_prompt_boosted,
+                            num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, generator=generator,
+                            output_type="latent" if refiner_pipeline else "pil",
+                            denoising_end=high_noise_frac if refiner_pipeline else None
+                        ).images
+                        if refiner_pipeline and isinstance(latents, torch.Tensor):
                             image = refiner_pipeline(
-                                prompt=final_prompt,
-                                negative_prompt=negative_prompt,
-                                image=latents, # Pass base latents as 'image' input
-                                num_inference_steps=num_refiner_steps, # Can use different steps for refiner # Use total steps here too
-                                denoising_start=high_noise_frac, # Start refining from where base left off
-                                guidance_scale=guidance_scale, # Can use same guidance
-                                generator=generator,
+                                prompt=prompt_to_generate, negative_prompt=negative_prompt_boosted, image=latents,
+                                num_inference_steps=num_refiner_steps, denoising_start=high_noise_frac,
+                                guidance_scale=guidance_scale, generator=generator,
                             ).images[0]
-                            logger.debug("  SDXL Refiner finished.")
-                        elif refiner_pipeline and not isinstance(latents, torch.Tensor):
-                             logger.error("  SDXL Base pipeline did not return latents, cannot run refiner.")
-                             image = None # Mark as failed
-                        elif not refiner_pipeline and isinstance(latents, Image.Image):
-                             # Base pipeline already produced an image (no refiner used)
-                             logger.info("  SDXL Refiner not used, using base output directly.")
-                             image = latents # The 'latents' variable actually holds the PIL image here
-                        else:
-                             logger.error("  Unexpected state after SDXL base pipeline. Cannot proceed.")
-                             image = None
+                        elif not refiner_pipeline and isinstance(latents, Image.Image): image = latents
+                        else: logger.error("SDXL generation state error."); image = None
 
-
-                # --- End Generation Logic ---
-
+                # --- Save Image ---
                 if image:
                     output_filename = f"{model_name}_{checkpoint_label}_{gen_params_label}_{variation_name}_{file_id}.png"
                     output_path = os.path.join(variation_output_dir, output_filename)
@@ -557,11 +522,12 @@ def generate_images(
 
             except Exception as e: logger.error(f"  Failed generation for file ID {file_id}, variation {variation_name}: {e}\n{traceback.format_exc()}")
 
-            # Optional periodic cleanup
+            # --- Cleanup ---
             if (prompts_processed_count * len(prompt_variations) + list(prompt_variations.keys()).index(variation_name)) % 5 == 0:
                  gc.collect(); torch.cuda.empty_cache()
 
-    logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs from sample list.")
+    logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs.")
+
 
 
 # --- main function ---
@@ -574,6 +540,25 @@ def main():
 
     config = load_config(config_path)
     if config is None: return
+
+    # !--- Load OpenAI API Key ---!
+    openai_config = config.get("openai", {}) # Get the 'openai' dictionary, default to empty dict if not found
+    openai_api_key = openai_config.get("api_key") # Get the 'api_key' from the nested dictionary
+    if not openai_api_key:
+        logger.error("OpenAI API key not found in config.yaml under 'openai_api_key'.")
+        # Optionally try environment variable
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("OpenAI API key also not found in environment variable OPENAI_API_KEY. Cannot use OpenAI summarizer.")
+            # Decide whether to exit or proceed without summarization
+            # return # Exit if key is mandatory
+            openai_utils = None # Proceed without utils
+        else:
+            logger.info("Loaded OpenAI API key from environment variable.")
+            openai_utils = OpenAIUtils(api_key=openai_api_key, logger=logger)
+    else:
+        logger.info("Loaded OpenAI API key from config file.")
+        openai_utils = OpenAIUtils(api_key=openai_api_key, logger=logger)
 
     sample_ids = load_sample_ids(sample_list_path)
     if not sample_ids: logger.error("Sample ID list empty."); return
@@ -686,7 +671,8 @@ def main():
                                         gen_params_label=gen_params_label, # Pass gen param label
                                         sample_ids=sample_ids,
                                         prompt_variations=prompt_variations,
-                                        gen_hyperparams=gen_params # Pass the hyperparams dict
+                                        gen_hyperparams=gen_params, # Pass the hyperparams dict
+                                        openai_utils=openai_utils # Pass the instance
                                     )
                                 else:
                                     logger.error(f"Skipping generation for {save_type}/{gen_params_label} due to pipeline loading failure.")
