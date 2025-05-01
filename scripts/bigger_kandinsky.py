@@ -5,6 +5,8 @@ import yaml
 import traceback
 import numpy as np
 import json
+import math
+import torch.nn as nn
 from accelerate import Accelerator # Import Accelerator
 from accelerate.logging import get_logger # Use accelerate logger
 from diffusers import (
@@ -18,7 +20,7 @@ from diffusers import (
     KandinskyV22PriorPipeline, # Needed for Kandinsky loading context
     UNet2DConditionModel, # Import specific UNet class
 )
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 from transformers import (
     CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer, AutoTokenizer,
     CLIPImageProcessor # Keep if needed for other models
@@ -75,9 +77,10 @@ def select_top_topics(prompt, max_topics=10):
     return prompt
 
 class FinetuneModel:
-    def __init__(self, model_name, output_dir, logger_instance=None):
+    def __init__(self, model_name, output_dir, accelerator: Accelerator, logger_instance=None):
         self.model_name = model_name
         self.output_dir = output_dir
+        self.accelerator = accelerator
         self.logger = logger_instance or logging.getLogger(__name__)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = torch.float16 # Target precision for UNet LoRA / Base UNet
@@ -94,6 +97,9 @@ class FinetuneModel:
         self.best_val_loss = float('inf')
         self.best_epoch = -1
         self.current_epoch = 0
+        # Flags to track LoRA application for saving config
+        self._apply_lora_text_flag = False # Always False when using T5 swap
+        self._apply_lora_unet_flag = False
 
     def load_model(self):
         """Load model components, replacing CLIP with T5 for specified models."""
@@ -111,12 +117,14 @@ class FinetuneModel:
                  self.logger.info(f"Loading Text Encoder {t5_model_name} (this may take time)...")
                  # Load T5 in bfloat16 if possible for stability, otherwise float32. Freeze it.
                  try:
-                     t5_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-                     self.logger.info(f"Loading T5 in dtype: {t5_dtype}")
-                     self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, torch_dtype=t5_dtype)
+                    # Load T5 in float32 initially, accelerator might handle precision later if prepared
+                    # It will be frozen anyway.
+                    t5_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+                    self.logger.info(f"Loading T5 in dtype: {t5_dtype}")
+                    self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, torch_dtype=t5_dtype)
                  except Exception as e:
-                      self.logger.warning(f"Failed loading T5 in {t5_dtype}, trying float32: {e}")
-                      self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, torch_dtype=torch.float32)
+                    self.logger.warning(f"Failed loading T5 in {t5_dtype}, trying float32: {e}")
+                    self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, torch_dtype=torch.float32)
 
                  # Freeze the T5 encoder
                  for param in self.text_encoder.parameters():
@@ -422,7 +430,7 @@ class FinetuneModel:
         return avg_val_loss
 
 
-    def save_lora_weights(self, save_type="epoch", epoch=None, val_loss=None, hyperparameters=None):
+    def save_model_state(self, save_type="epoch", epoch=None, val_loss=None, hyperparameters=None):
         """Saves the trained LoRA weights AND the projection layer."""
         if epoch is None: epoch = self.current_epoch
         save_label = f"{save_type}_epoch_{epoch}"
@@ -436,8 +444,9 @@ class FinetuneModel:
         # --- Save UNet LoRA Adapters (if they exist) ---
         if self.unet and isinstance(self.unet, PeftModel): # Check if it's a PEFT model
             try:
+                unwrapped_unet = self.accelerator.unwrap_model(self.unet) # Unwrap
                 unet_path = os.path.join(output_subdir, "unet_lora")
-                self.unet.save_pretrained(unet_path) # Saves only adapters
+                unwrapped_unet.save_pretrained(unet_path)
                 save_paths["UNet_LoRA"] = unet_path
                 self.logger.info(f"Saved UNet LoRA weights to {unet_path}")
             except Exception as e:
@@ -448,8 +457,11 @@ class FinetuneModel:
         # --- Save Projection Layer State Dict ---
         if self.projection_layer:
             try:
+                # Unwrap the projection layer if it was prepared by accelerate
+                # (It should be if it's part of params_to_optimize)
+                unwrapped_proj = self.accelerator.unwrap_model(self.projection_layer)
                 proj_path = os.path.join(output_subdir, "projection_layer.pth")
-                torch.save(self.projection_layer.state_dict(), proj_path)
+                self.accelerator.save(unwrapped_proj.state_dict(), proj_path) # Use accelerator save
                 save_paths["ProjectionLayer"] = proj_path
                 self.logger.info(f"Saved Projection Layer state_dict to {proj_path}")
             except Exception as e:
@@ -474,12 +486,12 @@ class FinetuneModel:
         if not save_paths:
              self.logger.warning(f"No trainable weights (LoRA/Projection) were saved for {self.model_name} ({save_label}).")
 
+    # Inside FinetuneModel class in finetune_model_accelerate.py
 
-    def fine_tune(self, dataset_path, epochs=1, batch_size=1, learning_rate=1e-5, val_split=0.2):
-        """Fine-tune the model with LoRA, including validation and checkpointing."""
-        """Fine-tune the UNet LoRA adapters and the T5 projection layer."""
-        self.logger.info(f"Starting T5-UNet fine-tuning for {self.model_name}...")
-        self.logger.info(f"Dataset: {dataset_path}, Epochs: {epochs}, Batch Size: {batch_size}, LR: {learning_rate}, Val Split: {val_split}")
+    def fine_tune(self, dataset_path, epochs=1, batch_size=1, learning_rate=1e-5, val_split=0.2, gradient_accumulation_steps=1): # Add argument here
+        """Fine-tune the UNet LoRA adapters and the T5 projection layer using Accelerate."""
+        self.logger.info(f"Starting T5-UNet fine-tuning with Accelerate...")
+        self.logger.info(f"Dataset: {dataset_path}, Epochs: {epochs}, Batch Size: {batch_size}, LR: {learning_rate}, Val Split: {val_split}, Grad Accum: {gradient_accumulation_steps}") # Log it
         self.best_val_loss = float('inf'); self.best_epoch = -1
 
         # --- Model Component Checks ---
@@ -490,270 +502,450 @@ class FinetuneModel:
         if not self.scheduler: raise ValueError("Scheduler not loaded.")
         if self.model_name in ["sdxl", "kandinsky"] and not self.vae: raise ValueError("VAE not loaded.")
 
-        # Reset best validation loss for this run
-        self.best_val_loss = float('inf')
-        self.best_epoch = -1
-        
         try:
-            data_dir = os.path.dirname(dataset_path)
-            image_folder = os.path.join(data_dir, "images")
-            self.logger.info(f"Expecting images in: {image_folder}")
-            dataset = load_dataset(dataset_path)
-            if not dataset:
-                raise ValueError("load_dataset returned None or empty dataset.")
-            self.logger.info(f"Loaded dataset with {len(dataset)} entries.")
-            
-
-            if val_split > 0 and val_split < 1:
-                train_size = int((1.0 - val_split) * len(dataset))
-                val_size = len(dataset) - train_size
-                if train_size == 0 or val_size == 0:
-                    self.logger.warning(f"Dataset split resulted in 0 samples for train ({train_size}) or validation ({val_size}). Training on full dataset.")
-                    train_dataset = dataset
-                    val_dataset = None
-                else:
-                    # Use random_split for better shuffling
-                    train_dataset, val_dataset = torch.utils.data.random_split(
-                        dataset, [train_size, val_size],
-                        generator=torch.Generator().manual_seed(42) # for reproducible splits
-                    )
-            else:
-                self.logger.warning("val_split is not between 0 and 1. Training on full dataset.")
-                train_dataset = dataset
-                val_dataset = None
-
+            # --- Dataset Loading and Splitting ---
+            # ... (Dataset loading/splitting logic as before) ...
+            full_dataset = load_dataset(dataset_path); # ... handle None ...
+            train_dataset, val_dataset = None, None; val_dataloader = None
+            if 0 < val_split < 1:
+                train_size = int((1.0 - val_split) * len(full_dataset)); val_size = len(full_dataset) - train_size
+                if train_size > 0 and val_size > 0:
+                    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+                    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+                else: train_dataset = full_dataset
+            else: train_dataset = full_dataset
             train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            self.logger.info(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset) if val_dataset else 0}")
+            data_dir = os.path.dirname(dataset_path); image_folder = os.path.join(data_dir, "images")
 
-            self.logger.info(f"Training dataset size: {len(train_dataset)}")
-            if val_dataset:
-                self.logger.info(f"Validation dataset size: {len(val_dataset)}")
-                val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False) # Dataloader for validation
-            else:
-                val_dataloader = None
 
-            
-            params_to_optimize = []
-            trainable_param_count = 0
-            if self.projection_layer:
-                params_to_optimize.extend(self.projection_layer.parameters())
-                self.logger.info("Added Projection Layer parameters to optimizer.")
-            # Add UNet LoRA parameters (if LoRA was applied)
-            if self.unet and isinstance(self.unet, PeftModel):
-                params_to_optimize.extend(filter(lambda p: p.requires_grad, self.unet.parameters()))
-                self.logger.info("Added UNet LoRA parameters to optimizer.")
-
+            # --- Optimizer Setup ---
+            params_to_optimize = []; models_to_prep = []
+            if self.projection_layer: params_to_optimize.extend(self.projection_layer.parameters()); models_to_prep.append(self.projection_layer); self.logger.info("Added Projection Layer params.")
+            if self.unet and isinstance(self.unet, PeftModel): params_to_optimize.extend(filter(lambda p: p.requires_grad, self.unet.parameters())); models_to_prep.append(self.unet); self.logger.info("Added UNet LoRA params.")
             optimizer = None
             if params_to_optimize:
-                trainable_param_count = sum(p.numel() for p in params_to_optimize)
-                self.logger.info(f"Total trainable parameters: {trainable_param_count}")
-                try:
-                    optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
-                    self.logger.info(f"Using AdamW8bit optimizer with LR: {learning_rate}")
-                except Exception as e:
-                    self.logger.warning(f"Failed AdamW8bit init: {e}, using standard AdamW.")
-                    optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate)
-            else:
-                self.logger.error("No trainable parameters found! Cannot train."); return
-            
-            self.logger.info(f"Total trainable parameters: {trainable_param_count}")
-            optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
-            
-            # Store hyperparams for saving
-            hyperparameters = { 'model_name': self.model_name, 'text_encoder': t5_model_name, # Log T5 used
-                                'epochs': epochs, 'batch_size': batch_size, 'learning_rate': learning_rate,
-                                'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.1, # Assuming fixed LoRA params
-                                'apply_lora_text_encoder': False, # Explicitly False
-                                'apply_lora_unet': getattr(self, '_apply_lora_unet_flag', None) }
+                try: optimizer = AdamW8bit(params_to_optimize, lr=learning_rate); self.logger.info("Using AdamW8bit.")
+                except Exception as e: self.logger.warning(f"AdamW8bit failed: {e}, using AdamW."); optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate)
+            else: self.logger.error("No trainable parameters!"); return
 
+            # !--- Define hyperparameters dict BEFORE prepare ---!
+            t5_model_name = self.text_encoder.name_or_path if hasattr(self.text_encoder, 'name_or_path') else 'Unknown T5'
+            hyperparameters = {
+                'model_name': self.model_name, 'text_encoder': t5_model_name,
+                'epochs': epochs, 'batch_size': batch_size, 'learning_rate': learning_rate,
+                'val_split': val_split, 'gradient_accumulation_steps': gradient_accumulation_steps,
+                'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.1,
+                'apply_lora_text_encoder': self._apply_lora_text_flag,
+                'apply_lora_unet': self._apply_lora_unet_flag
+            }
             
+            # --- Prepare with Accelerator ---
+            self.logger.info("Preparing components with Accelerator...")
+            if models_to_prep and optimizer:
+                prepared_components = self.accelerator.prepare(*models_to_prep, optimizer, train_dataloader, val_dataloader if val_dataloader else None)
+                component_iter = iter(prepared_components)
+                if self.projection_layer in models_to_prep: self.projection_layer = next(component_iter)
+                if self.unet in models_to_prep: self.unet = next(component_iter)
+                self.optimizer = next(component_iter)
+                train_dataloader = next(component_iter)
+                if val_dataloader: val_dataloader = next(component_iter)
+            else: self.logger.error("Cannot prepare components."); return
+
+            # Ensure non-prepared models are on device
+            if self.text_encoder: self.text_encoder.to(self.accelerator.device); self.text_encoder.eval()
+            if self.vae: self.vae.to(self.accelerator.device); self.vae.eval()
+
+            # --- Training Setup ---
+            num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
+            max_train_steps = epochs * num_update_steps_per_epoch
+            self.logger.info("***** Running training *****")
+            self.logger.info(f"  Num train examples = {len(train_dataset)}")
+            self.logger.info(f"  Num validation examples = {len(val_dataset) if val_dataset else 0}")
+            self.logger.info(f"  Num Epochs = {epochs}")
+            self.logger.info(f"  Instantaneous batch size per device = {batch_size}")
+            self.logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
+            self.logger.info(f"  Total optimization steps = {max_train_steps}")
+
+
             global_step = 0
+            # --- Training Loop ---
             for epoch in range(epochs):
-                self.current_epoch = epoch + 1 # Update current epoch (1-based)
+                self.current_epoch = epoch + 1
                 self.logger.info(f"--- Starting Epoch {self.current_epoch}/{epochs} ---")
-                # Set trainable models to train mode
-                if self.unet: self.unet.train() # PEFT model handles base freeze
+                if self.unet: self.unet.train()
                 if self.projection_layer: self.projection_layer.train()
-                # Keep frozen models in eval
-                if self.text_encoder: self.text_encoder.eval()
-                if self.vae: self.vae.eval()
 
-                total_train_loss = 0.0
-                num_train_batches = 0
+                total_train_loss = 0.0; num_train_batches = 0
                 for step, batch in enumerate(train_dataloader):
                     try:
-                        image_filenames = batch['image']
-                        prompts = batch['prompt']
-                        if not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
-                            self.logger.warning(f"Skipping batch due to invalid prompts: {prompts}")
-                            continue
-                        pixel_values_list = []
-                        valid_prompts = []
-                        valid_indices = []
+                        # --- Image Loading ---
+                        # ... (image loading logic) ...
+                        image_filenames = batch['image']; prompts = batch['prompt']
+                        if not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts): continue
+                        pixel_values_list = []; valid_prompts = []
                         for i, (img_filename, prompt) in enumerate(zip(image_filenames, prompts)):
                             try:
-                                image_path = os.path.join(image_folder, img_filename)
-                                image = Image.open(image_path).convert('RGB')
-                                image = image.resize((self.image_size, self.image_size))
-                                image_np = np.array(image).astype(np.float32) / 255.0
-                                image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
-                                pixel_values_list.append(image_tensor)
-                                valid_prompts.append(prompt)
-                                valid_indices.append(i)
-                            except Exception:
-                                self.logger.warning(f"Error loading image {img_filename}")
-                                continue
-                        if not pixel_values_list:
-                            self.logger.warning("Skipping batch as no valid images processed.")
-                            continue
-                        pixel_values = torch.stack(pixel_values_list).to(self.device, dtype=torch.float32)
+                                image_path = os.path.join(image_folder, img_filename); image = Image.open(image_path).convert('RGB').resize((self.image_size, self.image_size))
+                                image_np = np.array(image).astype(np.float32) / 255.0; image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
+                                pixel_values_list.append(image_tensor); valid_prompts.append(prompt)
+                            except Exception as img_err: self.logger.debug(f"Train Skip img {img_filename}: {img_err}")
+                        if not pixel_values_list: continue
+                        pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device, dtype=torch.float32)
                         prompts = valid_prompts
-                        optimizer.zero_grad()
-                        added_cond_kwargs = {}
-                        target_values = None
-                        loss = None
-                        encoder_hidden_states = None
-                        noisy_input = None
-                        latents = None
-                        # --- Text Encoding with T5 ---
-                        try:
-                            # Tokenize with T5 tokenizer, handle longer sequences
-                            t5_max_length = self.tokenizer.model_max_length # Get T5's max length
-                            inputs = self.tokenizer(
-                                prompts, padding="max_length", max_length=t5_max_length,
-                                truncation=True, return_tensors="pt"
-                            ).to(self.device)
-                            # Get T5 embeddings (ensure T5 is in eval mode and correct dtype)
-                            with torch.no_grad():
-                                t5_outputs = self.text_encoder(inputs.input_ids)
-                                t5_hidden_states = t5_outputs.last_hidden_state.to(dtype=self.projection_layer.weight.dtype) # Match proj layer input dtype
-                            # Project T5 embeddings
-                            projected_embeddings = self.projection_layer(t5_hidden_states)
-                            if torch.isnan(projected_embeddings).any() or torch.isinf(projected_embeddings).any():
-                                self.logger.warning(f"NaN/Inf in projected embeddings Step {step+1}."); continue
-                            encoder_hidden_states = projected_embeddings # Use projected as input to UNet
-                        except Exception as text_err: self.logger.error(f"Text/Projection failed: {text_err}"); continue
 
+                        # --- Accumulate Gradients ---
+                        with self.accelerator.accumulate(models_to_prep[0]):
+                            loss = None; noisy_input = None; target_values = None; encoder_hidden_states = None
+                            # --- Text Encoding + Projection ---
+                            try:
+                                t5_max_length = self.tokenizer.model_max_length
+                                inputs = self.tokenizer(prompts, padding="max_length", max_length=t5_max_length, truncation=True, return_tensors="pt").to(self.accelerator.device)
+                                with torch.no_grad():
+                                    t5_outputs = self.text_encoder(inputs.input_ids)
+                                    t5_hidden_states = t5_outputs.last_hidden_state.to(dtype=self.projection_layer.weight.dtype)
+                                projected_embeddings = self.projection_layer(t5_hidden_states)
+                                if torch.isnan(projected_embeddings).any() or torch.isinf(projected_embeddings).any(): continue
+                                encoder_hidden_states = projected_embeddings
+                            except Exception as text_err: self.logger.error(f"Text/Projection failed: {text_err}"); continue
 
-                        if self.model_name in ["sdxl", "kandinsky"]:
-                            pixel_values_norm = pixel_values * 2.0 - 1.0
-                            if torch.isnan(pixel_values_norm).any():
-                                continue
-                            with torch.no_grad():
-                                vae_output = self.vae.encode(pixel_values_norm.to(dtype=torch.float32))
-                                if isinstance(self.vae, AutoencoderKL):
-                                    latent_dist = vae_output.latent_dist
-                                    latents = latent_dist.sample()
-                                else:
-                                    latents = vae_output.latents
-                            scaling_factor = getattr(self.vae.config, 'scaling_factor', 0.18215)
-                            latents = latents * scaling_factor
-                            latents = latents.to(dtype=self.dtype)
-                            noise = torch.randn_like(latents)
-                            timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=self.device).long()
-                            noisy_input = self.scheduler.add_noise(latents, noise, timesteps)
+                            # --- Prepare Image Latents/Pixels and Noise ---
+                            if self.model_name in ["sdxl", "kandinsky"]:
+                                # ... (VAE encode, scale, cast to self.dtype logic) ...
+                                pixel_values_norm = pixel_values * 2.0 - 1.0; # ... NaN check ...
+                                with torch.no_grad(): input_vae = pixel_values_norm.to(dtype=torch.float32); vae_output = self.vae.encode(input_vae)
+                                if isinstance(self.vae, AutoencoderKL): latents = vae_output.latent_dist.sample()
+                                elif isinstance(self.vae, VQModel): latents = vae_output.latents
+                                else: continue
+                                if latents is None or torch.isnan(latents).any() or torch.isinf(latents).any(): continue
+                                scaling_factor = getattr(self.vae.config, 'scaling_factor', 0.18215); latents = (latents.float() * scaling_factor).to(dtype=self.dtype) # Use dtype
+                                if torch.isnan(latents).any() or torch.isinf(latents).any(): continue
+                                noise = torch.randn_like(latents); timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=self.accelerator.device).long()
+                                noisy_input = self.scheduler.add_noise(latents, noise, timesteps)
+                            else: loss = torch.tensor(0.0, device=self.accelerator.device) # Placeholder
+
+                            if noisy_input is None or torch.isnan(noisy_input).any() or torch.isinf(noisy_input).any(): continue
                             target_values = noise
-                            if self.model_name == "sdxl":
-                                prompt_embeds, pooled_embeds = self._encode_prompt_sdxl(prompts)
-                                if torch.isnan(prompt_embeds).any() or torch.isinf(prompt_embeds).any() or torch.isnan(pooled_embeds).any() or torch.isinf(pooled_embeds).any():
-                                    continue
-                                encoder_hidden_states = prompt_embeds
-                                add_time_ids = self._get_add_time_ids(
-                                    (self.image_size, self.image_size), (0,0), (self.image_size, self.image_size), dtype=prompt_embeds.dtype
-                                )
-                                add_time_ids = add_time_ids.repeat(len(prompts), 1).to(self.device)
-                                added_cond_kwargs = {"text_embeds": pooled_embeds, "time_ids": add_time_ids}
-                            else:
-                                inputs = self.tokenizer(
-                                    prompts, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt"
-                                ).to(self.device)
-                                temp_hidden_states = self.text_encoder(inputs.input_ids)[0].to(dtype=self.dtype)
-                                if torch.isnan(temp_hidden_states).any() or torch.isinf(temp_hidden_states).any():
-                                    continue
-                                encoder_hidden_states = temp_hidden_states
-                                zero_image_embeds = torch.zeros((noisy_input.shape[0], 1280), dtype=self.dtype, device=self.device)
-                                added_cond_kwargs["image_embeds"] = zero_image_embeds
-                        elif self.model_name == "karlo":
-                            inputs = self.tokenizer(
-                                prompts, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt"
-                            ).to(self.device)
-                            encoder_hidden_states = self.text_encoder(inputs.input_ids)[0]
-                            if torch.isnan(encoder_hidden_states).any() or torch.isinf(encoder_hidden_states).any():
-                                continue
-                            loss = torch.nn.functional.mse_loss(encoder_hidden_states.float(), torch.zeros_like(encoder_hidden_states).float())
-                            noisy_input = None
-                            target_values = None
 
-                        # --- Forward Pass ---
-                        if self.model_name != "karlo":
-                            if self.unet is None or noisy_input is None or encoder_hidden_states is None:
-                                continue
-                            unet_args = {
-                                "sample": noisy_input.to(dtype=self.dtype),
-                                "timestep": timesteps,
-                                "encoder_hidden_states": encoder_hidden_states.to(dtype=self.dtype),
-                                "added_cond_kwargs": added_cond_kwargs
-                            }
-                            model_pred = self.unet(**unet_args).sample
-                            if hasattr(model_pred, "sample"):
-                                model_pred = model_pred.sample
-                            if model_pred.shape[1] == target_values.shape[1] * 2:
-                                model_pred = model_pred[:, :target_values.shape[1], :, :]
-                            if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
-                                continue
-                            loss = torch.nn.functional.mse_loss(model_pred.float(), target_values.float(), reduction="mean")
-                        
-                        # --- Backward & Step ---
-                        if loss is not None and not torch.isnan(loss):
-                            loss.backward()
-                            if params_to_optimize: torch.nn.utils.clip_grad_norm_(params_to_optimize, 1.0)
-                            optimizer.step()
-                            total_train_loss += loss.item(); num_train_batches += 1
-                            if global_step % 50 == 0: self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}, Train Loss: {loss.item():.4f}")
-                        else: self.logger.warning(f"Invalid loss ({loss}) Step {step+1}.")
-                        global_step += 1
+                            # --- Forward Pass (UNet) ---
+                            if self.unet and encoder_hidden_states is not None and self.model_name != "karlo":
+                                unet_args = { "sample": noisy_input, "timestep": timesteps, "encoder_hidden_states": encoder_hidden_states, "added_cond_kwargs": {} }
+                                # Add Kandinsky specific kwargs if needed
+                                if self.model_name == "kandinsky":
+                                    image_embed_dim = 1280 # Adjust if needed based on UNet config
+                                    batch_size_current = noisy_input.shape[0]
+                                    zero_image_embeds = torch.zeros(
+                                        (batch_size_current, image_embed_dim),
+                                        dtype=self.unet.dtype, # Match UNet dtype
+                                        device=self.accelerator.device
+                                    )
+                                    unet_args["added_cond_kwargs"]["image_embeds"] = zero_image_embeds
+                                # Add SDXL specific kwargs if needed (pooled embeds from T5?)
+                                # This part is complex for T5 replacement in SDXL
 
-                    except Exception as e:
-                        self.logger.error(f"Training step failed: {e}\n{traceback.format_exc()}")
-                        continue
+                                model_pred = self.unet(**unet_args).sample
+                                if hasattr(model_pred, "sample"): model_pred = model_pred.sample
+                                # ... (Shape slicing logic) ...
+                                if model_pred.shape[1] != target_values.shape[1]:
+                                    if model_pred.shape[1] == target_values.shape[1] * 2: model_pred = model_pred[:, :target_values.shape[1], :, :]
+                                    else: continue
+                                if torch.isnan(model_pred).any() or torch.isinf(model_pred).any(): continue
+                                loss = torch.nn.functional.mse_loss(model_pred.float(), target_values.float(), reduction="mean")
+
+                            # --- Backward & Step ---
+                            if loss is not None and not torch.isnan(loss):
+                                self.accelerator.backward(loss / gradient_accumulation_steps)
+                                total_train_loss += loss.item(); num_train_batches += 1
+                                if self.accelerator.sync_gradients:
+                                    if params_to_optimize: self.accelerator.clip_grad_norm_(params_to_optimize, 1.0)
+                                    if self.optimizer: self.optimizer.step(); self.optimizer.zero_grad()
+                                if self.accelerator.is_main_process and global_step % 50 == 0: self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}, Train Loss: {loss.item():.4f}")
+                            else: self.logger.warning(f"Invalid loss ({loss}) Step {step+1}.")
+                            global_step += 1
+                        # --- End Accumulate Block ---
+                    except Exception as e: self.logger.error(f"Training step failed: {e}\n{traceback.format_exc()}"); continue
+
                 # --- End of Epoch ---
                 avg_train_loss = total_train_loss / num_train_batches if num_train_batches > 0 else float('nan')
-                self.logger.info(f"Epoch {self.current_epoch}, Average Train Loss: {avg_train_loss:.4f}")
+                self.logger.info(f"--- Epoch {self.current_epoch} Finished --- Avg Train Loss: {avg_train_loss:.4f}")
 
-                # --- Validation Step ---
-                if val_dataloader: # Check if validation is enabled
-                    # !--- Pass dataset_path to validate ---!
-                    avg_val_loss = self.validate(val_dataloader, dataset_path, batch_size=batch_size)
-                    # Checkpoint saving based on validation loss
-                    if avg_val_loss < self.best_val_loss:
-                        self.logger.info(f"New best validation loss: {avg_val_loss:.4f} (Previous: {self.best_val_loss:.4f}). Saving checkpoint.")
-                        self.best_val_loss = avg_val_loss
-                        self.best_epoch = self.current_epoch
-                        # Pass hyperparams to save function if needed
-                        self.save_lora_weights(save_type="best", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
-                else:
-                    self.logger.info("Skipping validation.")
-                    # Optionally save model every epoch if no validation
-                    # self.save_lora_weights(epoch=self.current_epoch, hyperparameters=hyperparameters)
+                # --- Validation ---
+                if val_dataloader:
+                    self.logger.warning("T5 Validation not implemented, using train loss for checkpointing.")
+                    avg_val_loss = avg_train_loss
+                else: avg_val_loss = avg_train_loss
 
-                gc.collect()
-                torch.cuda.empty_cache()
+                # --- Checkpointing ---
+                if not np.isnan(avg_val_loss) and avg_val_loss < self.best_val_loss:
+                    self.best_val_loss = avg_val_loss; self.best_epoch = self.current_epoch
+                    self.logger.info(f"New best loss: {avg_val_loss:.4f}. Saving 'best' checkpoint.")
+                    if self.accelerator.is_main_process: self.save_model_state(save_type="best", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
 
+                gc.collect(); torch.cuda.empty_cache()
             # --- End Training Loop ---
-            self.logger.info(f"Finished training {epochs} epochs.")
-            if self.best_epoch != -1:
-                 self.logger.info(f"Best validation loss recorded: {self.best_val_loss:.4f} at epoch {self.best_epoch}")
-            else:
-                 self.logger.info("No validation performed or no improvement detected.")
 
-            # --- Save Last Epoch Weights ---
+            self.logger.info(f"Finished training. Best loss: {self.best_val_loss:.4f} at epoch {self.best_epoch}")
             self.logger.info(f"Saving final weights from last epoch ({self.current_epoch})...")
-            last_val_loss = avg_val_loss if val_dataloader else None # Use last calculated val loss if available
-            self.save_lora_weights(save_type="last", epoch=self.current_epoch, val_loss=last_val_loss, hyperparameters=hyperparameters)
+            if self.accelerator.is_main_process: self.save_model_state(save_type="last", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
 
-        except Exception as e:
-            self.logger.error(f"Fine-tuning process failed: {e}\n{traceback.format_exc()}")
-            raise
-        finally:
-            self.logger.info(f"Cleaning up GPU memory after fine-tuning run.")
-            # del optimizer, train_dataloader, val_dataloader, dataset # Let GC handle
-            gc.collect(); torch.cuda.empty_cache()
+        except Exception as e: self.logger.error(f"Fine-tuning failed: {e}\n{traceback.format_exc()}"); raise
+        finally: self.logger.info("Cleaning up..."); gc.collect(); torch.cuda.empty_cache()
+
+    # --- (save_model_state needs to handle unwrapping projection layer too) ---
+    # --- (Need to implement validate_t5 or remove validation logic) ---
+
+    # def fine_tune(self, dataset_path, epochs=1, batch_size=1, learning_rate=1e-5, val_split=0.2):
+    #     """Fine-tune the model with LoRA, including validation and checkpointing."""
+    #     """Fine-tune the UNet LoRA adapters and the T5 projection layer."""
+    #     self.logger.info(f"Starting T5-UNet fine-tuning for {self.model_name}...")
+    #     self.logger.info(f"Dataset: {dataset_path}, Epochs: {epochs}, Batch Size: {batch_size}, LR: {learning_rate}, Val Split: {val_split}")
+    #     self.best_val_loss = float('inf'); self.best_epoch = -1
+
+    #     # --- Model Component Checks ---
+    #     if self.model_name != "karlo" and not self.unet: raise ValueError("UNet not loaded.")
+    #     if not self.text_encoder: raise ValueError("Text Encoder (T5) not loaded.")
+    #     if not self.projection_layer and self.model_name != "karlo": raise ValueError("Projection Layer not created.")
+    #     if not self.tokenizer: raise ValueError("Tokenizer not loaded.")
+    #     if not self.scheduler: raise ValueError("Scheduler not loaded.")
+    #     if self.model_name in ["sdxl", "kandinsky"] and not self.vae: raise ValueError("VAE not loaded.")
+
+    #     # Reset best validation loss for this run
+    #     self.best_val_loss = float('inf')
+    #     self.best_epoch = -1
+        
+    #     try:
+    #         # --- Dataset Loading and Splitting ---
+    #         data_dir = os.path.dirname(dataset_path)
+    #         image_folder = os.path.join(data_dir, "images")
+    #         self.logger.info(f"Expecting images in: {image_folder}")
+    #         dataset = load_dataset(dataset_path)
+    #         if not dataset:
+    #             raise ValueError("load_dataset returned None or empty dataset.")
+    #         self.logger.info(f"Loaded dataset with {len(dataset)} entries.")
+            
+
+    #         if val_split > 0 and val_split < 1:
+    #             train_size = int((1.0 - val_split) * len(dataset))
+    #             val_size = len(dataset) - train_size
+    #             if train_size == 0 or val_size == 0:
+    #                 self.logger.warning(f"Dataset split resulted in 0 samples for train ({train_size}) or validation ({val_size}). Training on full dataset.")
+    #                 train_dataset = dataset
+    #                 val_dataset = None
+    #             else:
+    #                 # Use random_split for better shuffling
+    #                 train_dataset, val_dataset = torch.utils.data.random_split(
+    #                     dataset, [train_size, val_size],
+    #                     generator=torch.Generator().manual_seed(42) # for reproducible splits
+    #                 )
+    #         else:
+    #             self.logger.warning("val_split is not between 0 and 1. Training on full dataset.")
+    #             train_dataset = dataset
+    #             val_dataset = None
+
+    #         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    #         self.logger.info(f"Training dataset size: {len(train_dataset)}")
+    #         if val_dataset:
+    #             self.logger.info(f"Validation dataset size: {len(val_dataset)}")
+    #             val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False) # Dataloader for validation
+    #         else:
+    #             val_dataloader = None
+
+    #         # --- Optimizer Setup ---
+    #         params_to_optimize = []
+    #         trainable_param_count = 0
+    #         models_to_prep = [] # Models/layers that need to be prepared by accelerate
+    #         if self.projection_layer:
+    #             params_to_optimize.extend(self.projection_layer.parameters())
+    #             models_to_prep.append(self.projection_layer) # Prepare projection layer
+    #             self.logger.info("Added Projection Layer parameters to optimizer.")
+    #         # Add UNet LoRA parameters (if LoRA was applied)
+    #         if self.unet and isinstance(self.unet, PeftModel):
+    #             params_to_optimize.extend(filter(lambda p: p.requires_grad, self.unet.parameters()))
+    #             models_to_prep.append(self.unet) # Prepare LoRA UNet
+    #             self.logger.info("Added UNet LoRA parameters to optimizer.")
+
+    #         optimizer = None
+    #         if params_to_optimize:
+    #             trainable_param_count = sum(p.numel() for p in params_to_optimize)
+    #             self.logger.info(f"Total trainable parameters: {trainable_param_count}")
+    #             try: optimizer = AdamW8bit(params_to_optimize, lr=learning_rate); self.logger.info("Using AdamW8bit.")
+    #             except Exception as e: self.logger.warning(f"AdamW8bit failed: {e}, using AdamW."); optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate)
+    #         else: self.logger.error("No trainable parameters found!"); return
+
+            
+    #         self.logger.info(f"Total trainable parameters: {trainable_param_count}")
+    #         optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
+            
+    #         # Store hyperparams for saving
+    #         hyperparameters = { 'model_name': self.model_name, 'text_encoder': t5_model_name, # Log T5 used
+    #                             'epochs': epochs, 'batch_size': batch_size, 'learning_rate': learning_rate,
+    #                             'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.1, # Assuming fixed LoRA params
+    #                             'apply_lora_text_encoder': False, # Explicitly False
+    #                             'apply_lora_unet': getattr(self, '_apply_lora_unet_flag', None) }
+
+            
+    #         global_step = 0
+    #         for epoch in range(epochs):
+    #             self.current_epoch = epoch + 1 # Update current epoch (1-based)
+    #             self.logger.info(f"--- Starting Epoch {self.current_epoch}/{epochs} ---")
+    #             # Set trainable models to train mode
+    #             if self.unet: self.unet.train() # PEFT model handles base freeze
+    #             if self.projection_layer: self.projection_layer.train()
+    #             # Keep frozen models in eval
+    #             if self.text_encoder: self.text_encoder.eval()
+    #             if self.vae: self.vae.eval()
+
+    #             total_train_loss = 0.0
+    #             num_train_batches = 0
+    #             for step, batch in enumerate(train_dataloader):
+    #                 try:
+    #                     image_filenames = batch['image']
+    #                     prompts = batch['prompt']
+    #                     if not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
+    #                         self.logger.warning(f"Skipping batch due to invalid prompts: {prompts}")
+    #                         continue
+    #                     pixel_values_list = []
+    #                     valid_prompts = []
+    #                     valid_indices = []
+    #                     for i, (img_filename, prompt) in enumerate(zip(image_filenames, prompts)):
+    #                         try:
+    #                             image_path = os.path.join(image_folder, img_filename)
+    #                             image = Image.open(image_path).convert('RGB')
+    #                             image = image.resize((self.image_size, self.image_size))
+    #                             image_np = np.array(image).astype(np.float32) / 255.0
+    #                             image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
+    #                             pixel_values_list.append(image_tensor)
+    #                             valid_prompts.append(prompt)
+    #                             valid_indices.append(i)
+    #                         except Exception:
+    #                             self.logger.warning(f"Error loading image {img_filename}")
+    #                             continue
+    #                     if not pixel_values_list:
+    #                         self.logger.warning("Skipping batch as no valid images processed.")
+    #                         continue
+    #                     pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device, dtype=torch.float32)
+    #                     prompts = valid_prompts
+    #                     optimizer.zero_grad()
+    #                     added_cond_kwargs = {}
+    #                     target_values = None
+    #                     loss = None
+    #                     encoder_hidden_states = None
+    #                     noisy_input = None
+    #                     latents = None
+    #                     # --- Accumulate Gradients ---
+    #                     with self.accelerator.accumulate(models_to_prep[0]): # Pass first prepared model/layer
+    #                     # --- Text Encoding with T5 ---
+    #                         try:
+    #                             t5_max_length = self.tokenizer.model_max_length
+    #                             inputs = self.tokenizer(prompts, padding="max_length", max_length=t5_max_length, truncation=True, return_tensors="pt").to(self.accelerator.device)
+    #                             with torch.no_grad(): # T5 is frozen
+    #                                 t5_outputs = self.text_encoder(inputs.input_ids)
+    #                                 t5_hidden_states = t5_outputs.last_hidden_state.to(dtype=self.projection_layer.weight.dtype)
+    #                             projected_embeddings = self.projection_layer(t5_hidden_states) # Trainable projection
+    #                             if torch.isnan(projected_embeddings).any() or torch.isinf(projected_embeddings).any(): continue
+    #                             encoder_hidden_states = projected_embeddings
+    #                         except Exception as text_err: self.logger.error(f"Text/Projection failed: {text_err}"); continue
+
+
+    #                         if self.model_name in ["sdxl", "kandinsky"]:
+    #                             # ... (VAE encode, scale, cast to self.dtype logic) ...
+    #                             pixel_values_norm = pixel_values * 2.0 - 1.0
+    #                             if torch.isnan(pixel_values_norm).any(): continue
+    #                             with torch.no_grad(): input_vae = pixel_values_norm.to(dtype=torch.float32); vae_output = self.vae.encode(input_vae)
+    #                             if isinstance(self.vae, AutoencoderKL): latents = vae_output.latent_dist.sample()
+    #                             elif isinstance(self.vae, VQModel): latents = vae_output.latents
+    #                             else: continue
+    #                             if latents is None or torch.isnan(latents).any() or torch.isinf(latents).any(): continue
+    #                             scaling_factor = getattr(self.vae.config, 'scaling_factor', 0.18215); latents = (latents.float() * scaling_factor).to(dtype=self.target_dtype) # Use target_dtype
+    #                             if torch.isnan(latents).any() or torch.isinf(latents).any(): continue
+    #                             noise = torch.randn_like(latents); timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=self.accelerator.device).long()
+    #                             noisy_input = self.scheduler.add_noise(latents, noise, timesteps)
+    #                         # Add elif for deepfloyd_if if needed
+    #                         else: loss = torch.tensor(0.0, device=self.accelerator.device) # Placeholder
+
+    #                         if noisy_input is None or torch.isnan(noisy_input).any() or torch.isinf(noisy_input).any(): continue
+    #                         target_values = noise
+
+    #                         # --- Forward Pass (UNet) ---
+    #                         if self.unet and encoder_hidden_states is not None and self.model_name != "karlo":
+    #                             unet_args = { "sample": noisy_input, "timestep": timesteps,
+    #                                         "encoder_hidden_states": encoder_hidden_states }
+    #                             # No added_cond_kwargs needed for T5 setup unless UNet requires specific ones
+    #                             model_pred = self.unet(**unet_args).sample
+    #                             if hasattr(model_pred, "sample"): model_pred = model_pred.sample
+    #                             # ... (Shape slicing logic if needed) ...
+    #                             if model_pred.shape[1] != target_values.shape[1]:
+    #                                 if model_pred.shape[1] == target_values.shape[1] * 2: model_pred = model_pred[:, :target_values.shape[1], :, :]
+    #                                 else: continue
+    #                             if torch.isnan(model_pred).any() or torch.isinf(model_pred).any(): continue
+    #                             loss = torch.nn.functional.mse_loss(model_pred.float(), target_values.float(), reduction="mean")
+
+    #                         # --- Backward & Step ---
+    #                         if loss is not None and not torch.isnan(loss):
+    #                             self.accelerator.backward(loss / gradient_accumulation_steps) # Scale loss
+    #                             total_train_loss += loss.item(); num_train_batches += 1
+
+    #                             if self.accelerator.sync_gradients:
+    #                                 if params_to_optimize: self.accelerator.clip_grad_norm_(params_to_optimize, 1.0)
+    #                                 if self.optimizer: self.optimizer.step(); self.optimizer.zero_grad()
+
+    #                             if self.accelerator.is_main_process and global_step % 50 == 0:
+    #                                 self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}, Train Loss: {loss.item():.4f}")
+    #                         else: self.logger.warning(f"Invalid loss ({loss}) Step {step+1}.")
+
+    #                         global_step += 1
+    #                 # --- End Accumulate Block ---
+    #                 except Exception as e:
+    #                     self.logger.error(f"Training step failed: {e}\n{traceback.format_exc()}")
+    #                     continue
+    #             # --- End of Epoch ---
+    #             avg_train_loss = total_train_loss / num_train_batches if num_train_batches > 0 else float('nan')
+    #             self.logger.info(f"Epoch {self.current_epoch}, Average Train Loss: {avg_train_loss:.4f}")
+
+    #             # --- Validation Step ---
+    #             if val_dataloader: # Check if validation is enabled
+    #                 # !--- Pass dataset_path to validate ---!
+    #                 avg_val_loss = self.validate(val_dataloader, dataset_path, batch_size=batch_size)
+    #                 # Checkpoint saving based on validation loss
+    #                 if avg_val_loss < self.best_val_loss:
+    #                     self.logger.info(f"New best validation loss: {avg_val_loss:.4f} (Previous: {self.best_val_loss:.4f}). Saving checkpoint.")
+    #                     self.best_val_loss = avg_val_loss
+    #                     self.best_epoch = self.current_epoch
+    #                     # Pass hyperparams to save function if needed
+    #                     self.save_lora_weights(save_type="best", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
+    #             else:
+    #                 self.logger.info("Skipping validation.")
+    #                 # Optionally save model every epoch if no validation
+    #                 # self.save_lora_weights(epoch=self.current_epoch, hyperparameters=hyperparameters)
+
+    #             # --- Checkpointing ---
+    #             if not np.isnan(avg_val_loss) and avg_val_loss < self.best_val_loss:
+    #                 self.best_val_loss = avg_val_loss
+    #                 self.best_epoch = self.current_epoch
+    #                 self.logger.info(f"New best loss: {avg_val_loss:.4f}. Saving 'best' checkpoint.")
+    #                 if self.accelerator.is_main_process: # Save only on main process
+    #                     self.save_lora_weights(save_type="best", epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters)
+
+    #             gc.collect()
+    #             torch.cuda.empty_cache()
+
+    #         # --- End Training Loop ---
+    #         self.logger.info(f"Finished training {epochs} epochs.")
+    #         if self.best_epoch != -1:
+    #              self.logger.info(f"Best validation loss recorded: {self.best_val_loss:.4f} at epoch {self.best_epoch}")
+    #         else:
+    #              self.logger.info("No validation performed or no improvement detected.")
+
+    #         # --- Save Last Epoch Weights ---
+    #         self.logger.info(f"Saving final weights from last epoch ({self.current_epoch})...")
+    #         last_val_loss = avg_val_loss if val_dataloader else None # Use last calculated val loss if available
+    #         self.save_lora_weights(save_type="last", epoch=self.current_epoch, val_loss=last_val_loss, hyperparameters=hyperparameters)
+
+    #     except Exception as e:
+    #         self.logger.error(f"Fine-tuning process failed: {e}\n{traceback.format_exc()}")
+    #         raise
+    #     finally:
+    #         self.logger.info(f"Cleaning up GPU memory after fine-tuning run.")
+    #         # del optimizer, train_dataloader, val_dataloader, dataset # Let GC handle
+    #         gc.collect(); torch.cuda.empty_cache()
