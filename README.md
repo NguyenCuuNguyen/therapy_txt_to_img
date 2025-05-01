@@ -61,7 +61,15 @@ Changes: + Summarize prompt instead of truncated by CLIP tokenizer
 #how to run:
 cd generated_images
 mkdir -p /home/iris/Documents/deep_learning/experiments/{new_finetune}/{sdxl,kandinsky,karlo,deepfloyd_if}
-export PYTHONPATH="/path/to/your/project:$PYTHONPATH" 
+export PYTHONPATH="/path/to/your/project:$PYTHONPATH"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+iter 1:
+    finetune: sdxl, kandinsky
+    new_finetune: deepfloyd
+
+iter 2: 
+    bigger_kadinsky
 
 
 ## Iteration 0: New finetune model focuses more on Karlo and DeepFloydIF
