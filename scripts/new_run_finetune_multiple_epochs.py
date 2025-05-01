@@ -38,7 +38,7 @@ def run_finetune(config_path):
         models_to_train = [
             # ("sdxl", os.path.join(base_output_dir, "sdxl")),
             # ("kandinsky", os.path.join(base_output_dir, "kandinsky")),
-            ("karlo", os.path.join(base_output_dir, "karlo")),
+            # ("karlo", os.path.join(base_output_dir, "karlo")),
             ("deepfloyd_if", os.path.join(base_output_dir, "deepfloyd_if"))
         ]
         
