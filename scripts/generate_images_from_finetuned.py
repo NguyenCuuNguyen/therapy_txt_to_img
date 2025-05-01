@@ -22,12 +22,18 @@ from diffusers import (
 from transformers import CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer
 # from peft import PeftModel # Not needed if using load_adapter/load_lora_weights
 
+#for summarizing prompt
+from transformers import pipeline as hf_pipeline # Use alias to avoid conflict if pipeline var used elsewhere
+import math # For ceiling division
+# Global variable to cache the summarizer pipeline
+summarizer_pipeline = None
+
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("/home/iris/Documents/deep_learning/src/logs/image_generation_filtered.log", mode='w'),
+        logging.FileHandler("/home/iris/Documents/deep_learning/src/logs/iter2_image_generation.log", mode='w'),
         logging.StreamHandler()
     ]
 )
@@ -240,17 +246,143 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         logger.error(f"Failed during model or LoRA loading for {model_name} from {lora_checkpoint_dir}: {e}\n{traceback.format_exc()}")
         return None, None
 
-# --- generate_images function (remains the same) ---
-def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, output_base_dir, checkpoint_label, sample_ids, prompt_variations):
-    """Generates images for specified prompts and variations using the loaded pipeline(s)."""
-    # ... (Implementation from previous step - no changes needed here) ...
+def summarize_long_prompt(prompt: str, tokenizer, max_length: int = 77, min_summary_tokens: int = 20):
+    """
+    Checks prompt length using the provided tokenizer and summarizes if it exceeds max_length.
+
+    Args:
+        prompt (str): The input text prompt.
+        tokenizer: The tokenizer instance (e.g., CLIPTokenizer) to check length accurately.
+        max_length (int): The target maximum token length (e.g., 77 for CLIP).
+        min_summary_tokens (int): Minimum desired length for the summary in tokens.
+
+    Returns:
+        str: The original prompt or a summarized version.
+    """
+    global summarizer_pipeline # Allow modification of the global cache
+
+    if not prompt or not isinstance(prompt, str):
+        logger.warning("Invalid prompt passed to summarizer.")
+        return ""
+
+    # 1. Check length using the target model's tokenizer
+    # We subtract 2 for potential start/end tokens the tokenizer might add
+    target_max_tokens = max_length - 2
+    token_ids = tokenizer(prompt, max_length=max_length, truncation=False)["input_ids"]
+
+    if len(token_ids) <= target_max_tokens:
+        logger.debug(f"Prompt length ({len(token_ids)} tokens) is within limit ({target_max_tokens}). No summarization needed.")
+        return prompt
+    else:
+        logger.warning(f"Prompt length ({len(token_ids)} tokens) exceeds limit ({target_max_tokens}). Attempting summarization.")
+
+        # 2. Summarize if too long
+        try:
+            # Load summarizer pipeline only if needed and not already loaded
+            if summarizer_pipeline is None:
+                logger.info("Loading summarization pipeline (facebook/bart-large-cnn)...")
+                # Ensure CUDA device is managed properly if GPU is available
+                device_id = 0 if torch.cuda.is_available() else -1
+                summarizer_pipeline = hf_pipeline("summarization", model="facebook/bart-large-cnn", device=device_id)
+                logger.info("Summarization pipeline loaded.")
+
+            # Estimate target summary length in words (very rough approximation)
+            # Aim for a summary significantly shorter than the max token limit
+            # BART expects max_length in terms of tokens, not words.
+            # Let's target roughly 60% of the max token length for the summary.
+            summary_max_len = math.ceil(target_max_tokens * 0.7) # Target token length for summary
+            summary_min_len = min(min_summary_tokens, summary_max_len - 5) # Ensure min is reasonable
+
+            logger.debug(f"Summarizing with min_length={summary_min_len}, max_length={summary_max_len}")
+
+            # Summarize the original *full* prompt
+            summary_list = summarizer_pipeline(prompt, max_length=summary_max_len, min_length=summary_min_len, do_sample=False)
+
+            if summary_list and isinstance(summary_list, list) and 'summary_text' in summary_list[0]:
+                summary = summary_list[0]['summary_text'].strip()
+                # Check summary length again (optional but good practice)
+                summary_token_ids = tokenizer(summary, max_length=max_length, truncation=False)["input_ids"]
+                logger.info(f"Summarized prompt: '{summary}' ({len(summary_token_ids)} tokens)")
+                if len(summary_token_ids) > target_max_tokens:
+                     logger.warning("Summarized prompt still exceeds token limit! Truncating summary.")
+                     # Force truncation by the tokenizer during the actual pipeline call later
+                     return summary # Return the summary, it will be truncated by CLIPTokenizer later
+                return summary
+            else:
+                logger.error("Summarization failed to produce valid output.")
+                # Fallback: Truncate the original prompt manually (less ideal)
+                truncated_prompt = tokenizer.decode(token_ids[:target_max_tokens], skip_special_tokens=True)
+                logger.warning(f"Falling back to manual truncation: '{truncated_prompt}'")
+                return truncated_prompt
+
+        except Exception as e:
+            logger.error(f"Failed during summarization or length check: {e}\n{traceback.format_exc()}")
+            # Fallback: Truncate the original prompt manually
+            try:
+                truncated_prompt = tokenizer.decode(token_ids[:target_max_tokens], skip_special_tokens=True)
+                logger.warning(f"Falling back to manual truncation due to error: '{truncated_prompt}'")
+                return truncated_prompt
+            except Exception: # If even decoding fails
+                logger.warning(f"Failed to summarize prompt")
+                return prompt[:max_length*5] # Very rough character limit fallback
+
+
+def generate_images(
+    prior_pipeline, #: KandinskyV22PriorPipeline, # Kandinsky specific
+    decoder_pipeline, #: StableDiffusionXLPipeline or KandinskyV22Pipeline, # Main pipeline
+    refiner_pipeline, #: StableDiffusionXLImg2ImgPipeline, # SDXL specific
+    model_name, #: str,
+    prompts_df, #: pd.DataFrame,
+    output_base_dir, #: str,
+    checkpoint_label, #: str,
+    sample_ids, #: set,
+    prompt_variations #: dict
+    ):
+    """
+    Generates images for specified prompts and variations using the loaded pipeline(s).
+    Includes SDXL refiner stage and quality improvements.
+
+    Args:
+        prior_pipeline: The loaded prior pipeline (used for Kandinsky). None otherwise.
+        decoder_pipeline: The loaded main/decoder pipeline (SDXL Base or Kandinsky Decoder).
+        refiner_pipeline: The loaded SDXL Refiner pipeline. None otherwise.
+        model_name (str): Name of the model (e.g., 'sdxl', 'kandinsky').
+        prompts_df (pd.DataFrame): DataFrame containing prompts and details ('file', 'prompt_details').
+        output_base_dir (str): Base directory to save generated images.
+        checkpoint_label (str): Label identifying the model config and checkpoint type.
+        sample_ids (set): A set of string file IDs for which to generate images.
+        prompt_variations (dict): Dictionary where keys are variation names (e.g., 'cbt')
+                                  and values are prompt template strings.
+    """
     if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
     if model_name == "kandinsky" and prior_pipeline is None: logger.error("Kandinsky requires prior_pipeline."); return
+    # Refiner is optional for SDXL, but recommended
+    if model_name == "sdxl" and refiner_pipeline is None: logger.warning("SDXL Refiner pipeline not provided, image quality may be suboptimal.")
     if not prompt_variations: logger.error("No prompt variations provided."); return
+
+    if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
+    # Get the primary tokenizer (SDXL uses tokenizer, Kandinsky uses prior's)
+    if model_name == "sdxl":
+        tokenizer_for_check = decoder_pipeline.tokenizer # SDXL's first tokenizer
+    elif model_name == "kandinsky":
+        if prior_pipeline: tokenizer_for_check = prior_pipeline.tokenizer
+        else: logger.error("Kandinsky prior pipeline missing for tokenizer check."); return
+    else:
+        # Fallback or add logic for other models if needed
+        tokenizer_for_check = decoder_pipeline.tokenizer if hasattr(decoder_pipeline, 'tokenizer') else None
+
+    if tokenizer_for_check is None:
+        logger.error(f"Could not determine tokenizer for length check for model {model_name}"); return
+
 
     logger.info(f"Generating images for {len(sample_ids)} specified IDs using {len(prompt_variations)} prompt variations.")
     img_size = 1024 if model_name == "sdxl" else 512
     device = decoder_pipeline.device
+
+    # --- Quality prompt additions ---
+    pos_quality_boost = ", sharp focus, highly detailed, intricate details, clear, high resolution, masterpiece, 8k"
+    neg_quality_boost = "blurry, blurred, smudged, low quality, worst quality, unclear, fuzzy, out of focus, text, words, letters, signature, watermark, username, artist name, deformed, distorted"
+    # ---
 
     if sample_ids:
         sample_id_list = list(sample_ids)
@@ -273,26 +405,101 @@ def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, ou
             variation_output_dir = os.path.join(output_base_dir, model_name, checkpoint_label, variation_name)
             os.makedirs(variation_output_dir, exist_ok=True)
 
-            try: final_prompt = prompt_template.format(txt_prompt=prompt_details)
+            try:
+                base_final_prompt = prompt_template.format(txt_prompt=prompt_details)
+                # Add quality boosters
+                final_prompt = base_final_prompt + pos_quality_boost
+                negative_prompt = neg_quality_boost # Start negative prompt with quality terms
             except Exception as fmt_err: logger.error(f"  Error formatting prompt: {fmt_err}"); continue
-            logger.debug(f"  Formatted Prompt: {final_prompt}")
+            
+            # !--- Summarize the prompt BEFORE passing to pipeline ---!
+            # Use the boosted prompt for summarization check
+            prompt_to_generate = summarize_long_prompt(
+                final_prompt,
+                tokenizer=tokenizer_for_check, # Pass the relevant tokenizer
+                max_length=77 # CLIP's typical limit
+            )
+            # !-------------------------------------------------------!
+            
+            logger.debug(f"  Formatted Prompt w/ Boosters: {final_prompt}")
+            logger.debug(f"  Negative Prompt w/ Boosters: {negative_prompt}")
 
             try:
                 generator = torch.Generator(device=device).manual_seed(42 + index + hash(variation_name))
-                negative_prompt = "low quality, bad quality, blurry, text, words, letters, signature"
                 image = None
+
                 with torch.no_grad():
                     if model_name == "kandinsky":
+                        # --- Kandinsky Stage 1: Prior ---
                         logger.debug("  Running Kandinsky Prior...")
-                        prior_output = prior_pipeline(prompt=final_prompt, negative_prompt=negative_prompt, num_inference_steps=25, generator=generator)
-                        image_embeds = prior_output.image_embeds; negative_image_embeds = prior_output.negative_image_embeds
+                        prior_output = prior_pipeline(
+                            prompt=final_prompt, # Use boosted prompt
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=25, # Keep prior steps relatively low
+                            generator=generator
+                        )
+                        image_embeds = prior_output.image_embeds
+                        negative_image_embeds = prior_output.negative_image_embeds
+                        logger.debug("  Finished Kandinsky Prior.")
+
+                        # --- Kandinsky Stage 2: Decoder ---
                         logger.debug("  Running Kandinsky Decoder...")
-                        image = decoder_pipeline(prompt=final_prompt, image_embeds=image_embeds, negative_image_embeds=negative_image_embeds, height=img_size, width=img_size, num_inference_steps=50, guidance_scale=4.0, generator=generator).images[0]
-                    elif model_name == "sdxl":
                         image = decoder_pipeline(
-                            prompt=final_prompt, negative_prompt=negative_prompt, height=img_size, width=img_size,
-                            num_inference_steps=30, guidance_scale=7.5, generator=generator, num_images_per_prompt=1
+                            prompt=final_prompt, # Pass boosted prompt again
+                            image_embeds=image_embeds,
+                            negative_image_embeds=negative_image_embeds,
+                            height=img_size,
+                            width=img_size,
+                            num_inference_steps=50, # Can increase decoder steps
+                            guidance_scale=4.0,
+                            generator=generator
                         ).images[0]
+                        logger.debug("  Finished Kandinsky Decoder.")
+
+                    elif model_name == "sdxl":
+                        # --- SDXL Stage 1: Base ---
+                        logger.debug("  Running SDXL Base...")
+                        n_steps = 40 # Increased base steps
+                        high_noise_frac = 0.8 # Fraction of steps for base model when using refiner
+
+                        latents = decoder_pipeline( # Use the main pipeline (decoder_pipeline var)
+                            prompt=final_prompt,
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=n_steps,
+                            guidance_scale=8.0, # Slightly increased guidance
+                            generator=generator,
+                            # If using refiner, output latents and potentially denoise only partially
+                            output_type="latent" if refiner_pipeline else "pil", # Output latents only if refiner exists
+                            denoising_end=high_noise_frac if refiner_pipeline else None # Stop base early if using refiner
+                        ).images # Output is latents or PIL image
+
+                        # --- SDXL Stage 2: Refiner ---
+                        if refiner_pipeline and isinstance(latents, torch.Tensor): # Check if we got latents
+                            logger.debug(f"  SDXL Base finished, latent shape: {latents.shape}. Running Refiner...")
+                            # Refiner needs the same prompt and the base latents
+                            image = refiner_pipeline(
+                                prompt=final_prompt,
+                                negative_prompt=negative_prompt,
+                                image=latents, # Pass base latents as 'image' input
+                                num_inference_steps=n_steps, # Use total steps here too
+                                denoising_start=high_noise_frac, # Start refining from where base left off
+                                guidance_scale=8.0, # Can use same guidance
+                                generator=generator,
+                            ).images[0]
+                            logger.debug("  SDXL Refiner finished.")
+                        elif refiner_pipeline and not isinstance(latents, torch.Tensor):
+                             logger.error("  SDXL Base pipeline did not return latents, cannot run refiner.")
+                             image = None # Mark as failed
+                        elif not refiner_pipeline and isinstance(latents, Image.Image):
+                             # Base pipeline already produced an image (no refiner used)
+                             logger.info("  SDXL Refiner not used, using base output directly.")
+                             image = latents # The 'latents' variable actually holds the PIL image here
+                        else:
+                             logger.error("  Unexpected state after SDXL base pipeline. Cannot proceed.")
+                             image = None
+
+
+                # --- End Generation Logic ---
 
                 if image:
                     output_filename = f"{model_name}_{checkpoint_label}_{variation_name}_{file_id}.png"
@@ -303,10 +510,80 @@ def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, ou
 
             except Exception as e: logger.error(f"  Failed generation for file ID {file_id}, variation {variation_name}: {e}\n{traceback.format_exc()}")
 
+            # Optional periodic cleanup
             if (prompts_processed_count * len(prompt_variations) + list(prompt_variations.keys()).index(variation_name)) % 5 == 0:
                  gc.collect(); torch.cuda.empty_cache()
 
     logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs from sample list.")
+
+
+# --- generate_images function (remains the same) ---
+# def generate_images(prior_pipeline, decoder_pipeline, model_name, prompts_df, output_base_dir, checkpoint_label, sample_ids, prompt_variations):
+#     """Generates images for specified prompts and variations using the loaded pipeline(s)."""
+#     # ... (Implementation from previous step - no changes needed here) ...
+#     if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
+#     if model_name == "kandinsky" and prior_pipeline is None: logger.error("Kandinsky requires prior_pipeline."); return
+#     if not prompt_variations: logger.error("No prompt variations provided."); return
+
+#     logger.info(f"Generating images for {len(sample_ids)} specified IDs using {len(prompt_variations)} prompt variations.")
+#     img_size = 1024 if model_name == "sdxl" else 512
+#     device = decoder_pipeline.device
+
+#     if sample_ids:
+#         sample_id_list = list(sample_ids)
+#         logger.debug(f"Sample file IDs to generate (first 5): {sample_id_list[:5]}")
+#         if sample_id_list: logger.debug(f"Type of first sample file ID: {type(sample_id_list[0])}")
+#     else: logger.warning("Sample ID list is empty!")
+
+#     prompts_processed_count = 0
+#     for index, row in prompts_df.iterrows():
+#         file_id = str(row.get('file', f'row_{index}')).strip()
+#         logger.debug(f"Checking file ID: '{file_id}' (Type: {type(file_id)}) against sample_ids set.")
+#         if file_id not in sample_ids: logger.debug(f"Skipping file ID '{file_id}'."); continue
+
+#         prompts_processed_count += 1
+#         prompt_details = row.get('prompt_details', '')
+#         logger.info(f"Processing File ID: {file_id} (Row {index})")
+
+#         for variation_name, prompt_template in prompt_variations.items():
+#             logger.info(f"  Generating for variation: {variation_name}")
+#             variation_output_dir = os.path.join(output_base_dir, model_name, checkpoint_label, variation_name)
+#             os.makedirs(variation_output_dir, exist_ok=True)
+
+#             try: final_prompt = prompt_template.format(txt_prompt=prompt_details)
+#             except Exception as fmt_err: logger.error(f"  Error formatting prompt: {fmt_err}"); continue
+#             logger.debug(f"  Formatted Prompt: {final_prompt}")
+
+#             try:
+#                 generator = torch.Generator(device=device).manual_seed(42 + index + hash(variation_name))
+#                 negative_prompt = "low quality, bad quality, blurry, text, words, letters, signature"
+#                 image = None
+#                 with torch.no_grad():
+#                     if model_name == "kandinsky":
+#                         logger.debug("  Running Kandinsky Prior...")
+#                         prior_output = prior_pipeline(prompt=final_prompt, negative_prompt=negative_prompt, num_inference_steps=25, generator=generator)
+#                         image_embeds = prior_output.image_embeds; negative_image_embeds = prior_output.negative_image_embeds
+#                         logger.debug("  Running Kandinsky Decoder...")
+#                         image = decoder_pipeline(prompt=final_prompt, image_embeds=image_embeds, negative_image_embeds=negative_image_embeds, height=img_size, width=img_size, num_inference_steps=50, guidance_scale=4.0, generator=generator).images[0]
+#                     elif model_name == "sdxl":
+#                         image = decoder_pipeline(
+#                             prompt=final_prompt, negative_prompt=negative_prompt, height=img_size, width=img_size,
+#                             num_inference_steps=30, guidance_scale=7.5, generator=generator, num_images_per_prompt=1
+#                         ).images[0]
+
+#                 if image:
+#                     output_filename = f"{model_name}_{checkpoint_label}_{variation_name}_{file_id}.png"
+#                     output_path = os.path.join(variation_output_dir, output_filename)
+#                     image.save(output_path)
+#                     logger.info(f"  Saved image: {output_path}")
+#                 else: logger.warning(f"  Image generation failed for {file_id}, variation {variation_name}")
+
+#             except Exception as e: logger.error(f"  Failed generation for file ID {file_id}, variation {variation_name}: {e}\n{traceback.format_exc()}")
+
+#             if (prompts_processed_count * len(prompt_variations) + list(prompt_variations.keys()).index(variation_name)) % 5 == 0:
+#                  gc.collect(); torch.cuda.empty_cache()
+
+#     logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs from sample list.")
 
 
 # --- main function ---
@@ -315,7 +592,7 @@ def main():
     prompts_csv_path = "/home/iris/Documents/deep_learning/data/input_csv/FILE_SUPERTOPIC_DESCRIPTION.csv"
     sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
     prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
-    generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter1"
+    generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2"
 
     config = load_config(config_path)
     if config is None: return
