@@ -131,7 +131,7 @@ def run_finetune(config_path):
         # ------------------------------------
 
         for model_name, base_output_dir in models_to_train:
-            output_dir = os.path.join(base_output_dir, model_name)
+            output_dir = base_output_dir
             logger.info(f"========== Starting Pipeline for: {model_name} ==========", main_process_only=True)
 
             # Reset best for this model
