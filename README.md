@@ -53,5 +53,16 @@ Run ```python scripts/generate_images_from_finetuned.py``` to
 
 
 
-## Iterate 2: New finetune model:
+## Iterate 2: 
+Changes: + Summarize prompt instead of truncated by CLIP tokenizer
+         + Add refiner
+
+
+#how to run:
+cd generated_images
+mkdir -p /home/iris/Documents/deep_learning/experiments/{new_finetune}/{sdxl,kandinsky,karlo,deepfloyd_if}
+
+
+
+## Iteration 0: New finetune model focuses more on Karlo and DeepFloydIF
 Clear hugging face cache: rm -rf ~/.cache/huggingface/hub/models--*
