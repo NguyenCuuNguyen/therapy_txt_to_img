@@ -11,6 +11,7 @@ from pathlib import Path # For easier path handling
 from PIL import Image
 from diffusers import (
     StableDiffusionXLPipeline,
+    StableDiffusionXLImg2ImgPipeline, # For SDXL Refiner
     DiffusionPipeline,
     AutoencoderKL,
     VQModel,
@@ -260,7 +261,7 @@ def summarize_long_prompt(prompt: str, tokenizer, max_length: int = 77, min_summ
         str: The original prompt or a summarized version.
     """
     global summarizer_pipeline # Allow modification of the global cache
-
+    logger.info(f"the prompt is {prompt}")
     if not prompt or not isinstance(prompt, str):
         logger.warning("Invalid prompt passed to summarizer.")
         return ""
@@ -335,8 +336,10 @@ def generate_images(
     prompts_df, #: pd.DataFrame,
     output_base_dir, #: str,
     checkpoint_label, #: str,
+    gen_params_label, # Added label for generation hyperparams
     sample_ids, #: set,
-    prompt_variations #: dict
+    prompt_variations, #: dict
+    gen_hyperparams # Added generation hyperparameters
     ):
     """
     Generates images for specified prompts and variations using the loaded pipeline(s).
@@ -350,9 +353,11 @@ def generate_images(
         prompts_df (pd.DataFrame): DataFrame containing prompts and details ('file', 'prompt_details').
         output_base_dir (str): Base directory to save generated images.
         checkpoint_label (str): Label identifying the model config and checkpoint type.
+        gen_params_label, # Added label for generation hyperparams
         sample_ids (set): A set of string file IDs for which to generate images.
         prompt_variations (dict): Dictionary where keys are variation names (e.g., 'cbt')
                                   and values are prompt template strings.
+        gen_hyperparams (dict): Dictionary of generation hyperparameters (e.g., num_inference_steps, guidance_scale).
     """
     if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
     if model_name == "kandinsky" and prior_pipeline is None: logger.error("Kandinsky requires prior_pipeline."); return
@@ -361,6 +366,8 @@ def generate_images(
     if not prompt_variations: logger.error("No prompt variations provided."); return
 
     if decoder_pipeline is None: logger.error("Main/Decoder pipeline is None."); return
+
+    # --- Tokenizer for length check ---
     # Get the primary tokenizer (SDXL uses tokenizer, Kandinsky uses prior's)
     if model_name == "sdxl":
         tokenizer_for_check = decoder_pipeline.tokenizer # SDXL's first tokenizer
@@ -374,6 +381,12 @@ def generate_images(
     if tokenizer_for_check is None:
         logger.error(f"Could not determine tokenizer for length check for model {model_name}"); return
 
+    # --- Extract generation hyperparameters ---
+    num_inference_steps = gen_hyperparams.get("num_inference_steps", 40) # Default 40
+    guidance_scale = gen_hyperparams.get("guidance_scale", 7.5) # Default 7.5
+    # SDXL Refiner specific params
+    high_noise_frac = gen_hyperparams.get("high_noise_frac", 0.8) # Default 0.8 for refiner split
+    num_refiner_steps = gen_hyperparams.get("num_refiner_steps", 25) # Default 25 for refiner
 
     logger.info(f"Generating images for {len(sample_ids)} specified IDs using {len(prompt_variations)} prompt variations.")
     img_size = 1024 if model_name == "sdxl" else 512
@@ -402,7 +415,8 @@ def generate_images(
 
         for variation_name, prompt_template in prompt_variations.items():
             logger.info(f"  Generating for variation: {variation_name}")
-            variation_output_dir = os.path.join(output_base_dir, model_name, checkpoint_label, variation_name)
+            # !--- Create output dir including gen_params label ---!
+            variation_output_dir = os.path.join(output_base_dir, model_name, checkpoint_label, gen_params_label, variation_name)
             os.makedirs(variation_output_dir, exist_ok=True)
 
             try:
@@ -414,7 +428,7 @@ def generate_images(
             
             # !--- Summarize the prompt BEFORE passing to pipeline ---!
             # Use the boosted prompt for summarization check
-            prompt_to_generate = summarize_long_prompt(
+            final_prompt = summarize_long_prompt(
                 final_prompt,
                 tokenizer=tokenizer_for_check, # Pass the relevant tokenizer
                 max_length=77 # CLIP's typical limit
@@ -431,11 +445,17 @@ def generate_images(
                 with torch.no_grad():
                     if model_name == "kandinsky":
                         # --- Kandinsky Stage 1: Prior ---
-                        logger.debug("  Running Kandinsky Prior...")
+
+                        # Use hyperparameters for Kandinsky if specified differently, otherwise use defaults
+                        k_prior_steps = gen_hyperparams.get("kandinsky_prior_steps", 25)
+                        k_decoder_steps = gen_hyperparams.get("kandinsky_decoder_steps", 50)
+                        k_guidance = gen_hyperparams.get("kandinsky_guidance", 4.0)
+
+                        logger.debug(f"  Running Kandinsky Prior (Steps: {k_prior_steps})...")
                         prior_output = prior_pipeline(
                             prompt=final_prompt, # Use boosted prompt
                             negative_prompt=negative_prompt,
-                            num_inference_steps=25, # Keep prior steps relatively low
+                            num_inference_steps=k_prior_steps, # Keep prior steps relatively low
                             generator=generator
                         )
                         image_embeds = prior_output.image_embeds
@@ -450,23 +470,23 @@ def generate_images(
                             negative_image_embeds=negative_image_embeds,
                             height=img_size,
                             width=img_size,
-                            num_inference_steps=50, # Can increase decoder steps
-                            guidance_scale=4.0,
+                            num_inference_steps=k_decoder_steps, # Can increase decoder steps
+                            guidance_scale=k_guidance,
                             generator=generator
                         ).images[0]
                         logger.debug("  Finished Kandinsky Decoder.")
 
                     elif model_name == "sdxl":
                         # --- SDXL Stage 1: Base ---
-                        logger.debug("  Running SDXL Base...")
-                        n_steps = 40 # Increased base steps
-                        high_noise_frac = 0.8 # Fraction of steps for base model when using refiner
+                        logger.debug(f"  Running SDXL Base (Steps: {num_inference_steps}, Guidance: {guidance_scale}, Denoising End: {high_noise_frac if refiner_pipeline else None})...")
+                        # n_steps = 40 # Increased base steps
+                        # high_noise_frac = 0.8 # Fraction of steps for base model when using refiner
 
                         latents = decoder_pipeline( # Use the main pipeline (decoder_pipeline var)
                             prompt=final_prompt,
                             negative_prompt=negative_prompt,
-                            num_inference_steps=n_steps,
-                            guidance_scale=8.0, # Slightly increased guidance
+                            num_inference_steps=num_inference_steps, 
+                            guidance_scale=guidance_scale, # Slightly increased guidance
                             generator=generator,
                             # If using refiner, output latents and potentially denoise only partially
                             output_type="latent" if refiner_pipeline else "pil", # Output latents only if refiner exists
@@ -481,9 +501,9 @@ def generate_images(
                                 prompt=final_prompt,
                                 negative_prompt=negative_prompt,
                                 image=latents, # Pass base latents as 'image' input
-                                num_inference_steps=n_steps, # Use total steps here too
+                                num_inference_steps=num_refiner_steps, # Can use different steps for refiner # Use total steps here too
                                 denoising_start=high_noise_frac, # Start refining from where base left off
-                                guidance_scale=8.0, # Can use same guidance
+                                guidance_scale=guidance_scale, # Can use same guidance
                                 generator=generator,
                             ).images[0]
                             logger.debug("  SDXL Refiner finished.")
@@ -502,7 +522,7 @@ def generate_images(
                 # --- End Generation Logic ---
 
                 if image:
-                    output_filename = f"{model_name}_{checkpoint_label}_{variation_name}_{file_id}.png"
+                    output_filename = f"{model_name}_{checkpoint_label}_{gen_params_label}_{variation_name}_{file_id}.png"
                     output_path = os.path.join(variation_output_dir, output_filename)
                     image.save(output_path)
                     logger.info(f"  Saved image: {output_path}")
@@ -515,6 +535,147 @@ def generate_images(
                  gc.collect(); torch.cuda.empty_cache()
 
     logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs from sample list.")
+
+
+# --- main function ---
+def main():
+    config_path = "/home/iris/Documents/deep_learning/config/config.yaml"
+    prompts_csv_path = "/home/iris/Documents/deep_learning/data/input_csv/FILE_SUPERTOPIC_DESCRIPTION.csv"
+    sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
+    prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
+    generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2"
+
+    config = load_config(config_path)
+    if config is None: return
+
+    sample_ids = load_sample_ids(sample_list_path)
+    if not sample_ids: logger.error("Sample ID list empty."); return
+
+    prompt_variations = load_prompt_variations(prompt_variations_path)
+    if not prompt_variations: logger.error("Prompt variations empty."); return
+
+    if not os.path.exists(prompts_csv_path): logger.error(f"Prompts CSV not found: {prompts_csv_path}"); return
+    try:
+        prompts_df = pd.read_csv(prompts_csv_path)
+        if 'file' not in prompts_df.columns: logger.error("CSV missing 'file' column."); return
+        prompts_df['file'] = prompts_df['file'].astype(str)
+        logger.info(f"Loaded {len(prompts_df)} total prompts from {prompts_csv_path}")
+    except Exception as e: logger.error(f"Failed to load prompts CSV: {e}"); return
+
+    base_output_dir = config.get("base_output_dir", "/home/iris/Documents/deep_learning/experiments/custom_finetuned")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    target_dtype = torch.float16
+
+    base_model_ids = {
+        "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+        "kandinsky_prior": "kandinsky-community/kandinsky-2-2-prior",
+        "kandinsky_decoder": "kandinsky-community/kandinsky-2-2-decoder",
+    }
+    models_to_generate = config.get("models_to_generate", ["sdxl", "kandinsky"])
+
+    # !--- Define Generation Hyperparameter Sets to Test ---!
+    generation_param_sets = [
+        # Set 0: Defaults / Previous settings
+        {"guidance_scale": 7.5, "num_inference_steps": 40, "high_noise_frac": 0.8, "num_refiner_steps": 25, "kandinsky_guidance": 4.0, "kandinsky_decoder_steps": 50},
+        # Set 1: Increased Steps
+        {"guidance_scale": 7.5, "num_inference_steps": 50, "high_noise_frac": 0.8, "num_refiner_steps": 30, "kandinsky_guidance": 4.0, "kandinsky_decoder_steps": 60},
+        # Set 2: Lower Guidance
+        {"guidance_scale": 6.5, "num_inference_steps": 40, "high_noise_frac": 0.8, "num_refiner_steps": 25, "kandinsky_guidance": 3.5, "kandinsky_decoder_steps": 50},
+        # Set 3: Higher Guidance
+        {"guidance_scale": 8.5, "num_inference_steps": 40, "high_noise_frac": 0.8, "num_refiner_steps": 25, "kandinsky_guidance": 5.0, "kandinsky_decoder_steps": 50},
+        # Set 4: Different Refiner Split
+        {"guidance_scale": 7.5, "num_inference_steps": 40, "high_noise_frac": 0.7, "num_refiner_steps": 25, "kandinsky_guidance": 4.0, "kandinsky_decoder_steps": 50},
+        # Add more sets as needed
+    ]
+
+    # --- Pre-load Refiner if needed ---
+    refiner_pipeline = None
+    if "sdxl" in models_to_generate:
+        logger.info("Pre-loading SDXL Refiner pipeline...")
+        try:
+            refiner_pipeline = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+                base_model_ids["sdxl_refiner"],
+                torch_dtype=target_dtype, use_safetensors=True, variant="fp16"
+            ).to(device)
+            logger.info("SDXL Refiner loaded successfully.")
+        except Exception as e: logger.error(f"Failed to load SDXL Refiner: {e}.")
+
+    for model_name in models_to_generate:
+        model_finetune_base = os.path.join(base_output_dir, model_name)
+        logger.info(f"Processing model: {model_name} (Fine-tune base: {model_finetune_base})")
+        if not os.path.isdir(model_finetune_base): logger.warning(f"Dir not found: {model_finetune_base}."); continue
+
+        current_base_ids = {}
+        if model_name == "sdxl": current_base_ids["sdxl"] = base_model_ids["sdxl"]
+        elif model_name == "kandinsky":
+            current_base_ids["kandinsky_prior"] = base_model_ids["kandinsky_prior"]
+            current_base_ids["kandinsky_decoder"] = base_model_ids["kandinsky_decoder"]
+        else: logger.warning(f"Base model IDs not defined for {model_name}."); continue
+
+        for config_dir_name in os.listdir(model_finetune_base):
+            if config_dir_name.startswith("hyperparam_config_"):
+                config_dir_path = os.path.join(model_finetune_base, config_dir_name)
+                logger.info(f"--- Processing Config Directory: {config_dir_name} ---")
+                checkpoints = find_checkpoint_dirs(config_dir_path)
+
+                for save_type, checkpoint_dir in checkpoints.items():
+                    if checkpoint_dir:
+                        logger.info(f"--- Generating images for '{save_type}' checkpoint ---")
+                        # !--- Loop through Generation Hyperparameters ---!
+                        for gen_idx, gen_params in enumerate(generation_param_sets):
+                            gen_params_label = f"gen_params_{gen_idx}"
+                            logger.info(f"--- Running Generation with Params Set {gen_idx}: {gen_params} ---")
+
+                            pipeline, prior_pipeline_k = None, None
+                            try:
+                                pipeline, prior_pipeline_k = load_pipeline_with_lora(
+                                    model_name=model_name,
+                                    base_model_ids=current_base_ids,
+                                    lora_checkpoint_dir=checkpoint_dir,
+                                    device=device,
+                                    target_dtype=target_dtype
+                                )
+                                current_refiner = refiner_pipeline if model_name == "sdxl" else None
+                                if pipeline or prior_pipeline_k:
+                                    generate_images(
+                                        prior_pipeline=prior_pipeline_k,
+                                        decoder_pipeline=pipeline,
+                                        refiner_pipeline=current_refiner, # Pass refiner
+                                        model_name=model_name,
+                                        prompts_df=prompts_df,
+                                        output_base_dir=generation_output_base,
+                                        # Include gen_params_label in checkpoint label for output path
+                                        checkpoint_label=f"{config_dir_name}_{save_type}",
+                                        gen_params_label=gen_params_label, # Pass gen param label
+                                        sample_ids=sample_ids,
+                                        prompt_variations=prompt_variations,
+                                        gen_hyperparams=gen_params # Pass the hyperparams dict
+                                    )
+                                else:
+                                    logger.error(f"Skipping generation for {save_type}/{gen_params_label} due to pipeline loading failure.")
+                            except Exception as e:
+                                logger.error(f"Failed generation pipeline for {model_name}/{config_dir_name}/{save_type}/{gen_params_label}: {e}\n{traceback.format_exc()}")
+                            finally:
+                                logger.debug(f"Cleaning up after {save_type}/{gen_params_label}...")
+                                del pipeline; del prior_pipeline_k
+                                gc.collect(); torch.cuda.empty_cache()
+                        # --- End Generation Hyperparameter Loop ---
+                    else:
+                        logger.warning(f"No '{save_type}' checkpoint found for {config_dir_name}. Skipping.")
+                logger.info(f"--- Finished processing Config Directory: {config_dir_name} ---")
+        logger.info(f"========== Finished processing model: {model_name} ==========")
+
+    logger.info("Image generation script finished.")
+
+    # Cleanup refiner at the very end
+    del refiner_pipeline
+    gc.collect(); torch.cuda.empty_cache()
+    logger.info("Image generation script finished.")
+
+
+if __name__ == "__main__":
+    main()
+
 
 
 # --- generate_images function (remains the same) ---
@@ -584,99 +745,3 @@ def generate_images(
 #                  gc.collect(); torch.cuda.empty_cache()
 
 #     logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs from sample list.")
-
-
-# --- main function ---
-def main():
-    config_path = "/home/iris/Documents/deep_learning/config/config.yaml"
-    prompts_csv_path = "/home/iris/Documents/deep_learning/data/input_csv/FILE_SUPERTOPIC_DESCRIPTION.csv"
-    sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
-    prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
-    generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2"
-
-    config = load_config(config_path)
-    if config is None: return
-
-    sample_ids = load_sample_ids(sample_list_path)
-    if not sample_ids: logger.error("Sample ID list empty."); return
-
-    prompt_variations = load_prompt_variations(prompt_variations_path)
-    if not prompt_variations: logger.error("Prompt variations empty."); return
-
-    if not os.path.exists(prompts_csv_path): logger.error(f"Prompts CSV not found: {prompts_csv_path}"); return
-    try:
-        prompts_df = pd.read_csv(prompts_csv_path)
-        if 'file' not in prompts_df.columns: logger.error("CSV missing 'file' column."); return
-        prompts_df['file'] = prompts_df['file'].astype(str)
-        logger.info(f"Loaded {len(prompts_df)} total prompts from {prompts_csv_path}")
-    except Exception as e: logger.error(f"Failed to load prompts CSV: {e}"); return
-
-    base_output_dir = config.get("base_output_dir", "/home/iris/Documents/deep_learning/experiments/custom_finetuned")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    target_dtype = torch.float16
-
-    base_model_ids = {
-        "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
-        "kandinsky_prior": "kandinsky-community/kandinsky-2-2-prior",
-        "kandinsky_decoder": "kandinsky-community/kandinsky-2-2-decoder",
-    }
-    models_to_generate = config.get("models_to_generate", ["sdxl", "kandinsky"])
-
-    for model_name in models_to_generate:
-        model_finetune_base = os.path.join(base_output_dir, model_name)
-        logger.info(f"Processing model: {model_name} (Fine-tune base: {model_finetune_base})")
-        if not os.path.isdir(model_finetune_base): logger.warning(f"Dir not found: {model_finetune_base}."); continue
-
-        current_base_ids = {}
-        if model_name == "sdxl": current_base_ids["sdxl"] = base_model_ids["sdxl"]
-        elif model_name == "kandinsky":
-            current_base_ids["kandinsky_prior"] = base_model_ids["kandinsky_prior"]
-            current_base_ids["kandinsky_decoder"] = base_model_ids["kandinsky_decoder"]
-        else: logger.warning(f"Base model IDs not defined for {model_name}."); continue
-
-        for config_dir_name in os.listdir(model_finetune_base):
-            if config_dir_name.startswith("hyperparam_config_"):
-                config_dir_path = os.path.join(model_finetune_base, config_dir_name)
-                logger.info(f"--- Processing Config Directory: {config_dir_name} ---")
-                checkpoints = find_checkpoint_dirs(config_dir_path)
-
-                for save_type, checkpoint_dir in checkpoints.items():
-                    if checkpoint_dir:
-                        logger.info(f"--- Generating images for '{save_type}' checkpoint ---")
-                        pipeline, prior_pipeline = None, None
-                        try:
-                            pipeline, prior_pipeline = load_pipeline_with_lora(
-                                model_name=model_name,
-                                base_model_ids=current_base_ids,
-                                lora_checkpoint_dir=checkpoint_dir,
-                                device=device,
-                                target_dtype=target_dtype
-                            )
-                            if pipeline or (model_name == "kandinsky" and prior_pipeline):
-                                generate_images(
-                                    prior_pipeline=prior_pipeline,
-                                    decoder_pipeline=pipeline,
-                                    model_name=model_name,
-                                    prompts_df=prompts_df,
-                                    output_base_dir=generation_output_base,
-                                    checkpoint_label=f"{config_dir_name}_{save_type}",
-                                    sample_ids=sample_ids,
-                                    prompt_variations=prompt_variations
-                                )
-                            else:
-                                logger.error(f"Skipping generation for {save_type} due to pipeline loading failure.")
-                        except Exception as e:
-                            logger.error(f"Failed generation pipeline for {model_name}/{config_dir_name}/{save_type}: {e}\n{traceback.format_exc()}")
-                        finally:
-                            logger.info(f"Cleaning up after {save_type} checkpoint...")
-                            del pipeline; del prior_pipeline
-                            gc.collect(); torch.cuda.empty_cache()
-                    else:
-                        logger.warning(f"No '{save_type}' checkpoint found for {config_dir_name}. Skipping.")
-                logger.info(f"--- Finished processing Config Directory: {config_dir_name} ---")
-        logger.info(f"========== Finished processing model: {model_name} ==========")
-
-    logger.info("Image generation script finished.")
-
-if __name__ == "__main__":
-    main()
