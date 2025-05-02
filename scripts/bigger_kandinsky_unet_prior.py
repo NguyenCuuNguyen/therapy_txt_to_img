@@ -94,6 +94,9 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         self.projection_layer = nn.Linear(768, self.prior_embed_dim).to(
             device=self.prior.device, dtype=self.prior.dtype
         )
+        # Stricter initialization for projection layer
+        nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.projection_layer.bias)
         self.prior = prior
         if not hasattr(self.prior, 'logger'):
             self.prior.logger = self.logger
@@ -188,20 +191,36 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
     def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=None):
         batch_size = len(prompt) if isinstance(prompt, list) else 1
         if isinstance(prompt, str): prompt = [prompt]
+        # Validate prompts
+        if not all(isinstance(p, str) and p.strip() for p in prompt):
+            self.logger.warning(f"Invalid prompts detected: {prompt}. Using default prompt.")
+            prompt = ["a generic description"] * batch_size
         text_inputs = self.tokenizer(
             prompt, padding="max_length", max_length=self.tokenizer.model_max_length,
             truncation=True, return_tensors="pt",
         ).to(device)
         input_ids = text_inputs.input_ids
         attention_mask = text_inputs.attention_mask
+        self.logger.debug(f"Input IDs stats - min: {input_ids.min().item()}, max: {input_ids.max().item()}, mean: {input_ids.float().mean().item():.4f}")
+        self.logger.debug(f"Attention mask stats - min: {attention_mask.min().item()}, max: {attention_mask.max().item()}, mean: {attention_mask.float().mean().item():.4f}")
         with torch.no_grad():
             text_encoder_output = self.text_encoder(input_ids, attention_mask=attention_mask)
         last_hidden_state = text_encoder_output.last_hidden_state
         last_hidden_state = torch.nan_to_num(last_hidden_state, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.logger.debug(f"Last hidden state stats - min: {last_hidden_state.min().item():.4f}, max: {last_hidden_state.max().item():.4f}, mean: {last_hidden_state.mean().item():.4f}")
         prompt_embeds = last_hidden_state.mean(dim=1)
         target_dtype = self.projection_layer.weight.dtype
         prompt_embeds = prompt_embeds.to(target_dtype)
         prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.logger.debug(f"Prompt embeds before norm stats - min: {prompt_embeds.min().item():.4f}, max: {prompt_embeds.max().item():.4f}, mean: {prompt_embeds.mean().item():.4f}")
+        # Normalize only if std is non-zero
+        std = prompt_embeds.std(dim=1, keepdim=True)
+        if (std > 1e-6).all():
+            prompt_embeds = prompt_embeds / std.clamp(min=1e-6)
+        else:
+            self.logger.warning("Zero or near-zero std in prompt_embeds. Using random embeddings.")
+            prompt_embeds = torch.randn_like(prompt_embeds) * 0.01  # Small random noise
+        self.logger.debug(f"Prompt embeds after norm stats - min: {prompt_embeds.min().item():.4f}, max: {prompt_embeds.max().item():.4f}, mean: {prompt_embeds.mean().item():.4f}")
         prompt_embeds = self.projection_layer(prompt_embeds)
         prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
         text_sequence_length = 77
@@ -221,6 +240,12 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             negative_embeds_pooled = torch.nan_to_num(negative_embeds_pooled, nan=0.0, posinf=1.0, neginf=-1.0)
             negative_embeds_pooled = negative_embeds_pooled.to(target_dtype)
             negative_embeds_pooled = torch.nan_to_num(negative_embeds_pooled, nan=0.0, posinf=1.0, neginf=-1.0)
+            std_neg = negative_embeds_pooled.std(dim=1, keepdim=True)
+            if (std_neg > 1e-6).all():
+                negative_embeds_pooled = negative_embeds_pooled / std_neg.clamp(min=1e-6)
+            else:
+                self.logger.warning("Zero or near-zero std in negative_embeds_pooled. Using random embeddings.")
+                negative_embeds_pooled = torch.randn_like(negative_embeds_pooled) * 0.01
             negative_embeds_projected = self.projection_layer(negative_embeds_pooled)
             negative_embeds_projected = torch.nan_to_num(negative_embeds_projected, nan=0.0, posinf=1.0, neginf=-1.0)
             negative_embeds = negative_embeds_projected.unsqueeze(1).repeat(1, text_sequence_length, 1)
@@ -288,6 +313,11 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         if predicted_image_embedding.shape[1] == 1:
             predicted_image_embedding = predicted_image_embedding.squeeze(1)
         predicted_image_embedding = torch.nan_to_num(predicted_image_embedding, nan=0.0, posinf=1.0, neginf=-1.0)
+        # Normalize predicted_image_embedding
+        std = predicted_image_embedding.std(dim=1, keepdim=True)
+        if (std > 1e-6).all():
+            predicted_image_embedding = predicted_image_embedding / std.clamp(min=1e-6)
+        self.logger.debug(f"Predicted image embedding stats - min: {predicted_image_embedding.min().item():.4f}, max: {predicted_image_embedding.max().item():.4f}, mean: {predicted_image_embedding.mean().item():.4f}")
         if do_classifier_free_guidance:
             image_embeds_uncond, image_embeds_text = predicted_image_embedding.chunk(2)
             image_embeds = image_embeds_uncond + guidance_scale * (image_embeds_text - image_embeds_uncond)
@@ -295,7 +325,9 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         else:
             image_embeds = predicted_image_embedding
             negative_image_embeds = None
-        image_embeds = torch.nan_to_num(image_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        # Tighter clamping for image_embeds
+        image_embeds = torch.clamp(image_embeds, -5.0, 5.0)
+        self.logger.debug(f"Prior output stats - min: {image_embeds.min().item():.4f}, max: {image_embeds.max().item():.4f}, mean: {image_embeds.mean().item():.4f}")
         if output_type == "pt":
             output = image_embeds
         else:
@@ -353,13 +385,8 @@ class FinetuneModel:
             prior = PriorTransformer.from_pretrained(prior_model_id, subfolder="prior").to(dtype=self.dtype)
             self.logger.warning("PriorTransformer does not support gradient checkpointing; skipping")
             prior_scheduler = DPMSolverMultistepScheduler.from_pretrained(prior_model_id, subfolder="scheduler")
-            try:
-                image_encoder = CLIPVisionModelWithProjection.from_pretrained(prior_model_id, subfolder="image_encoder")
-                image_processor = CLIPImageProcessor.from_pretrained(prior_model_id, subfolder="image_encoder")
-            except Exception as clip_err:
-                self.logger.warning(f"Could not load CLIP vision model from {prior_model_id}: {clip_err}.")
-                image_encoder = None
-                image_processor = None
+            image_encoder = None
+            image_processor = None
             self.prior_pipeline = KandinskyV22PriorPipelineWithT5(
                 text_encoder=self.text_encoder, tokenizer=self.tokenizer, prior=prior,
                 scheduler=prior_scheduler, image_encoder=image_encoder,
@@ -426,6 +453,7 @@ class FinetuneModel:
                     prompts = batch.get('prompt')
                     if not image_filenames or not prompts or \
                        not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
+                        self.logger.warning(f"Val Step {step+1}: Invalid prompts or image filenames")
                         continue
                     pixel_values_list = []
                     valid_prompts = []
@@ -446,6 +474,7 @@ class FinetuneModel:
                         self.logger.debug(f"Skipping val batch {step+1}: No valid images loaded")
                         continue
                     pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device)
+                    self.logger.debug(f"Val Step {step+1}: Image batch stats - min: {pixel_values.min().item():.4f}, max: {pixel_values.max().item():.4f}, mean: {pixel_values.mean().item():.4f}")
                     prompts = valid_prompts
                     with torch.cuda.amp.autocast():
                         prior_output = self.prior_pipeline(
@@ -478,6 +507,9 @@ class FinetuneModel:
                         self.logger.warning(f"Val Step {step+1}: NaN/Inf in noisy_latents")
                         continue
                     noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
+                    # Normalize UNet inputs
+                    noisy_latents = noisy_latents / noisy_latents.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
+                    image_embeds = image_embeds / image_embeds.std(dim=1, keepdim=True).clamp(min=1e-6)
                     with torch.cuda.amp.autocast():
                         added_cond_kwargs = {"image_embeds": image_embeds.to(dtype=self.dtype)}
                         model_pred = self.unet(
@@ -550,9 +582,7 @@ class FinetuneModel:
             except Exception as e: self.logger.error(f"Failed save hyperparameters: {e}")
         if not save_paths: self.logger.warning(f"No trainable weights were saved for {self.model_name} ({save_label}).")
 
-    def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=1e-5, gradient_accumulation_steps=8):
-        if learning_rate > 1e-5:
-            self.logger.warning(f"High learning rate detected: {learning_rate}. Recommended value is 1e-5 for stability.")
+    def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8):
         fold_val_losses = []
         global_best_avg_val_loss = float('inf')
         global_best_model_state = None
@@ -602,6 +632,8 @@ class FinetuneModel:
                 self.prior_pipeline.to(self.accelerator.device)
                 self.vae.to(self.accelerator.device)
                 self.vae.eval()
+                # Adjust gradient scaler growth factor
+                self.accelerator.scaler._growth_factor = 1.25  # Slower growth
                 t5_model_name = getattr(self.prior_pipeline.text_encoder.config, "_name_or_path", "Unknown T5")
                 hyperparameters = { 'model_name': self.model_name, 'text_encoder': t5_model_name, 'epochs': epochs, 'batch_size': batch_size, 'learning_rate': learning_rate, 'gradient_accumulation_steps': gradient_accumulation_steps, 'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.1, 'apply_lora_text_encoder': self._apply_lora_text_flag, 'apply_lora_unet': self._apply_lora_unet_flag }
                 num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
@@ -615,12 +647,15 @@ class FinetuneModel:
                         self.prior_pipeline.projection_layer.train()
                     train_loss_epoch = 0.0
                     num_train_batches_epoch = 0
+                    num_skipped_steps = 0
                     for step, batch in enumerate(train_dataloader):
                         try:
                             image_filenames = batch.get('image')
                             prompts = batch.get('prompt')
+                            self.logger.debug(f"Train Step {step+1}: Prompts: {prompts}")
                             if not image_filenames or not prompts or \
                                not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
+                                self.logger.warning(f"Train Step {step+1}: Invalid prompts or image filenames")
                                 continue
                             pixel_values_list = []
                             valid_prompts = []
@@ -641,7 +676,11 @@ class FinetuneModel:
                                 self.logger.debug(f"Skipping train batch {step+1}: No valid images loaded.")
                                 continue
                             pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device)
+                            self.logger.debug(f"Train Step {step+1}: Image batch stats - min: {pixel_values.min().item():.4f}, max: {pixel_values.max().item():.4f}, mean: {pixel_values.mean().item():.4f}")
                             prompts = valid_prompts
+                            # Debug mode for step 16
+                            if step + 1 == 16:
+                                self.logger.debug(f"Train Step {step+1}: Detailed debug mode activated")
                             with self.accelerator.accumulate(self.unet):
                                 with torch.cuda.amp.autocast():
                                     prior_output = self.prior_pipeline(
@@ -674,6 +713,11 @@ class FinetuneModel:
                                         self.logger.warning(f"Train Step {step+1}: NaN/Inf in noisy_latents")
                                         continue
                                     noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
+                                    # Normalize UNet inputs
+                                    noisy_latents = noisy_latents / noisy_latents.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
+                                    image_embeds = image_embeds / image_embeds.std(dim=1, keepdim=True).clamp(min=1e-6)
+                                    self.logger.debug(f"Train Step {step+1}: Noisy latents stats - min: {noisy_latents.min().item():.4f}, max: {noisy_latents.max().item():.4f}, mean: {noisy_latents.mean().item():.4f}")
+                                    self.logger.debug(f"Train Step {step+1}: Image embeds stats - min: {image_embeds.min().item():.4f}, max: {image_embeds.max().item():.4f}, mean: {image_embeds.mean().item():.4f}")
                                     added_cond_kwargs = {"image_embeds": image_embeds.to(dtype=self.dtype)}
                                     model_pred = self.unet(
                                         sample=noisy_latents,
@@ -695,29 +739,34 @@ class FinetuneModel:
                                     if torch.isnan(loss) or torch.isinf(loss):
                                         self.logger.warning(f"Train Step {step+1}: Calculated loss is NaN or Inf")
                                         continue
-                                self.accelerator.backward(loss / gradient_accumulation_steps)
+                                self.accelerator.backward(loss / gradient_accumulation_steps * 50.0)
                                 if self.accelerator.sync_gradients:
                                     if params_to_optimize:
                                         grad_norm = torch.tensor(float('inf'), device=self.device)
                                         valid_gradients = True
                                         try:
-                                            grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 0.5)
-                                            self.logger.debug(f"Train Step {step+1}: Gradient norm: {grad_norm.item():.4f}")
+                                            raw_grad_norm = torch.norm(torch.stack([torch.norm(p.grad, 2) for p in params_to_optimize if p.grad is not None]), 2)
+                                            self.logger.debug(f"Train Step {step+1}: Raw gradient norm: {raw_grad_norm.item():.4f}")
+                                            grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 0.05)
+                                            self.logger.debug(f"Train Step {step+1}: Clipped gradient norm: {grad_norm.item():.4f}")
+                                            scaler_state = self.accelerator.scaler.get_state()
+                                            self.logger.debug(f"Train Step {step+1}: Gradient scaler state - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
                                         except ValueError as e:
-                                            if "unscale FP16 gradients" in str(e):
-                                                self.logger.warning(f"Train Step {step+1}: Skipping optimizer step due to NaN/Inf gradients")
-                                                valid_gradients = False
-                                            else:
-                                                raise e
+                                            self.logger.warning(f"Train Step {step+1}: Skipping optimizer step due to NaN/Inf gradients")
+                                            valid_gradients = False
+                                            self.logger.debug(f"Train Step {step+1}: Invalid gradients detected")
+                                            scaler_state = self.accelerator.scaler.get_state()
+                                            self.logger.debug(f"Train Step {step+1}: Gradient scaler state on failure - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
                                         if valid_gradients and not torch.isnan(grad_norm) and not torch.isinf(grad_norm):
                                             self.optimizer.step()
                                             self.optimizer.zero_grad()
                                         else:
                                             self.logger.debug(f"Train Step {step+1}: Optimizer step skipped due to invalid gradients")
+                                            num_skipped_steps += 1
                                 train_loss_epoch += self.accelerator.gather(loss).mean().item() * gradient_accumulation_steps
                                 num_train_batches_epoch += 1
-                                if self.accelerator.is_main_process and global_step % 50 == 0:
-                                    self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {loss.item():.4f}")
+                                if self.accelerator.is_main_process and global_step % 25 == 0:
+                                    self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {loss.item():.4f}, Skipped Steps: {num_skipped_steps}")
                                 global_step += 1
                         except Exception as e:
                             self.logger.error(f"Training step {step+1} failed: {e}\n{traceback.format_exc()}")
@@ -726,7 +775,7 @@ class FinetuneModel:
                             continue
                     avg_train_loss_epoch = train_loss_epoch / num_train_batches_epoch if num_train_batches_epoch > 0 else float('nan')
                     if self.accelerator.is_main_process:
-                        self.logger.info(f"Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}")
+                        self.logger.info(f"Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Skipped Steps: {num_skipped_steps}/{num_train_batches_epoch}")
                     avg_val_loss = float('inf')
                     if val_dataloader:
                         if self.accelerator.is_main_process:
@@ -770,7 +819,10 @@ if __name__ == "__main__":
         exit(1)
     epochs = config.get('epochs', 5)
     batch_size = config.get('batch_size', 1)
-    learning_rate = config.get('learning_rate', 1e-5)
+    learning_rate = config.get('learning_rate', 5e-8)
+    if learning_rate > 5e-8:
+        logger.warning(f"High learning rate in config: {learning_rate}. Capping at 5e-8 for stability.")
+        learning_rate = 5e-8
     gradient_accumulation_steps = config.get('gradient_accumulation_steps', 8)
     num_folds = config.get('num_folds', 5)
     apply_lora_unet = config.get('apply_lora_unet', True)
