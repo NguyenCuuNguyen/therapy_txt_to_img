@@ -74,3 +74,13 @@ iter 2:
 
 ## Iteration 0: New finetune model focuses more on Karlo and DeepFloydIF
 Clear hugging face cache: rm -rf ~/.cache/huggingface/hub/models--*
+
+
+## DIRECTORY:
+Setup to train originally with COCO: includes sdxl, kandinsky, karlo and deepfloyd but only sdxl and kandinsky really works. Prompt is truncated by CLIP.
+    finetune_model.py
+    run_finetune_multiple_epochs.py
+    generate_images_from_finetuned.py
+
+
+New set up emphasized on karlo and deepfloyd but that does not really work because deepfloyd has OOM error and karlo also has error, could not train sucessfully

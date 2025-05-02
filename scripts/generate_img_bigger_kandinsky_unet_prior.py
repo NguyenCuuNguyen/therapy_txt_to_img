@@ -18,10 +18,9 @@ from diffusers import (
 )
 from transformers import T5EncoderModel, T5Tokenizer
 from peft import PeftModel
-import torch.nn as nn
 
 # --- Logging Configuration ---
-log_file_path = "/home/iris/Documents/deep_learning/src/logs/iter2_bigger_kandinsky_image_generation.log"
+log_file_path = "/home/iris/Documents/deep_learning/src/logs/iter2_bigger_kandinsky_image_generation_unet_prior.log"
 log_level = logging.INFO
 
 logger = logging.getLogger()
@@ -48,104 +47,6 @@ console_handler.setLevel(log_level)
 console_formatter = logging.Formatter('%(levelname)s: %(message)s')
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
-
-# --- Custom Prior Pipeline for T5 Encoder ---
-class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
-    """Custom prior pipeline to handle T5 encoder with projection layer."""
-    def __init__(self, vae, text_encoder, tokenizer, prior, scheduler, projection_layer=None, logger=None):
-        super().__init__(vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, prior=prior, scheduler=scheduler)
-        self.projection_layer = projection_layer
-        self.logger = logger or logging.getLogger(__name__)
-        if projection_layer is None:
-            raise ValueError("Projection layer is required for T5 encoder.")
-        self.register_modules(vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, prior=prior, scheduler=scheduler)
-        self.logger.info("Initialized KandinskyV22PriorPipelineWithT5 with projection layer.")
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        """Custom from_pretrained to handle projection_layer and logger."""
-        projection_layer = kwargs.pop("projection_layer", None)
-        logger = kwargs.pop("logger", None)
-        # Load the parent pipeline with all arguments
-        pipeline = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-        # Create instance of custom class
-        instance = cls(
-            vae=pipeline.vae,
-            text_encoder=pipeline.text_encoder,
-            tokenizer=pipeline.tokenizer,
-            prior=pipeline.prior,
-            scheduler=pipeline.scheduler,
-            projection_layer=projection_layer,
-            logger=logger
-        )
-        return instance
-
-    def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=None):
-        """Custom encoding for T5 encoder with projection layer."""
-        self.logger.debug(f"Encoding prompt: {prompt[:100]}...")
-
-        batch_size = len(prompt) if isinstance(prompt, list) else 1
-        if isinstance(prompt, str):
-            prompt = [prompt]
-        
-        # Tokenize prompt
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        ).to(device)
-        input_ids = text_inputs.input_ids
-        attention_mask = text_inputs.attention_mask
-
-        # Encode with T5
-        with torch.no_grad():
-            text_encoder_output = self.text_encoder(input_ids, attention_mask=attention_mask)
-        last_hidden_state = text_encoder_output.last_hidden_state  # Shape: [batch_size, seq_len, 768]
-
-        # Apply projection layer
-        prompt_embeds = self.projection_layer(last_hidden_state)  # Shape: [batch_size, seq_len, 768]
-        self.logger.debug(f"Projected prompt embeds shape: {prompt_embeds.shape}")
-
-        # Pool embeddings (mean over sequence dimension, similar to CLIP text_embeds)
-        prompt_embeds = prompt_embeds.mean(dim=1)  # Shape: [batch_size, 768]
-        text_encoder_hidden_states = prompt_embeds  # For UNet cross-attention
-        text_mask = attention_mask
-
-        # Handle classifier-free guidance
-        if do_classifier_free_guidance:
-            negative_prompt = negative_prompt or [""] * batch_size
-            if isinstance(negative_prompt, str):
-                negative_prompt = [negative_prompt] * batch_size
-
-            negative_inputs = self.tokenizer(
-                negative_prompt,
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            ).to(device)
-            negative_input_ids = negative_inputs.input_ids
-            negative_attention_mask = negative_inputs.attention_mask
-
-            with torch.no_grad():
-                negative_output = self.text_encoder(negative_input_ids, attention_mask=negative_attention_mask)
-            negative_embeds = self.projection_layer(negative_output.last_hidden_state)  # Shape: [batch_size, seq_len, 768]
-            negative_embeds = negative_embeds.mean(dim=1)  # Shape: [batch_size, 768]
-
-            # Concatenate for guidance
-            prompt_embeds = torch.cat([negative_embeds, prompt_embeds], dim=0)
-            text_encoder_hidden_states = torch.cat([negative_embeds, text_encoder_hidden_states], dim=0)
-            text_mask = torch.cat([negative_attention_mask, attention_mask], dim=0)
-
-        # Repeat for multiple images per prompt
-        prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-        text_encoder_hidden_states = text_encoder_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
-        text_mask = text_mask.repeat_interleave(num_images_per_prompt, dim=0)
-
-        self.logger.debug(f"Final prompt embeds shape: {prompt_embeds.shape}")
-        return prompt_embeds, text_encoder_hidden_states, text_mask
 
 # --- Configuration ---
 def load_config(config_path):
@@ -196,7 +97,7 @@ def load_sample_ids(txt_path):
         return set()
 
 def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, device, target_dtype):
-    """Loads the Kandinsky pipeline with fine-tuned T5 encoder, projection layer, and LoRA weights."""
+    """Loads the Kandinsky pipeline with fine-tuned T5 encoder and UNet LoRA weights."""
     logger.info(f"Loading fine-tuned Kandinsky model from {lora_checkpoint_dir}...")
     pipeline = None
     prior_pipeline = None
@@ -217,28 +118,23 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
         logger.info(f"Loaded T5-base text encoder on {device} with dtype {t5_dtype}")
 
-        # Load projection layer
-        projection_layer_path = os.path.join(lora_checkpoint_dir, "best_projection_layer.pth")
-        if not os.path.exists(projection_layer_path):
-            raise FileNotFoundError(f"Projection layer not found at {projection_layer_path}")
-        t5_hidden_size = text_encoder.config.d_model
-        unet_cross_attn_dim = 768  # From Kandinsky UNet config
-        projection_layer = nn.Linear(t5_hidden_size, unet_cross_attn_dim).to(device, dtype=target_dtype)
-        projection_layer.load_state_dict(torch.load(projection_layer_path, map_location=device))
-        projection_layer.eval()
-        logger.info(f"Loaded projection layer from {projection_layer_path}")
+        # Load text encoder LoRA weights
+        text_encoder_lora_path = os.path.join(lora_checkpoint_dir, "best_text_encoder_lora")
+        if not os.path.exists(text_encoder_lora_path):
+            raise FileNotFoundError(f"Text encoder LoRA weights not found at {text_encoder_lora_path}")
+        text_encoder = PeftModel.from_pretrained(text_encoder, text_encoder_lora_path, torch_dtype=t5_dtype).to(device)
+        text_encoder.eval()
+        logger.info(f"Loaded text encoder LoRA weights from {text_encoder_lora_path}")
 
-        # Load Kandinsky prior pipeline with T5 encoder
+        # Load Kandinsky prior pipeline
         logger.info(f"Loading Kandinsky Prior Pipeline ({prior_id})...")
-        prior_pipeline = KandinskyV22PriorPipelineWithT5.from_pretrained(
+        prior_pipeline = KandinskyV22PriorPipeline.from_pretrained(
             prior_id,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
-            projection_layer=projection_layer,
-            logger=logger,
             torch_dtype=target_dtype
         ).to(device)
-        logger.info("Loaded Kandinsky prior pipeline with T5 encoder")
+        logger.info("Loaded Kandinsky prior pipeline with fine-tuned T5 encoder")
 
         # Load Kandinsky decoder pipeline
         logger.info(f"Loading Kandinsky Decoder Pipeline ({decoder_id})...")
@@ -280,7 +176,7 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         return None, None
 
 def generate_images(
-    prior_pipeline,  # KandinskyV22PriorPipelineWithT5
+    prior_pipeline,  # KandinskyV22PriorPipeline
     decoder_pipeline,  # KandinskyV22Pipeline
     refiner_pipeline,  # None for Kandinsky
     model_name,  # str
@@ -353,8 +249,7 @@ def generate_images(
 
         for variation_name, prompt_template in prompt_variations.items():
             logger.info(f"  Generating for variation: {variation_name}")
-            img_out_dir = "/home/iris/Documents/deep_learning/generated_images/iter2/best_t5_kandinsky"
-            variation_output_dir = os.path.join(img_out_dir, checkpoint_label, gen_params_label, variation_name)
+            variation_output_dir = os.path.join(output_base_dir, model_name, checkpoint_label, gen_params_label, variation_name)
             os.makedirs(variation_output_dir, exist_ok=True)
 
             try:
@@ -385,7 +280,7 @@ def generate_images(
                         model="gpt-4o-mini"
                     )
                     token_count = len(tokenizer_for_check(prompt_to_generate, max_length=t5_max_length, truncation=False)["input_ids"])
-                    logger.info(f"  GPT-4o-mini summary: '{prompt_to_generate}...' ({token_count} tokens)")
+                    logger.info(f"  GPT-4o-mini summary: '{prompt_to_generate[:100]}...' ({token_count} tokens)")
                 except Exception as e:
                     logger.error(f"Failed to summarize prompt with GPT-4o-mini: {e}\n{traceback.format_exc()}")
                     # Fallback: Truncate prompt manually
@@ -441,7 +336,7 @@ def main():
     sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
     prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
     generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2"
-    lora_checkpoint_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky"
+    lora_checkpoint_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky_unet_prior"
 
     config = load_config(config_path)
     if config is None:
