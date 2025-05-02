@@ -202,10 +202,12 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         input_ids = text_inputs.input_ids
         attention_mask = text_inputs.attention_mask
         self.logger.debug(f"Input IDs stats - min: {input_ids.min().item()}, max: {input_ids.max().item()}, mean: {input_ids.float().mean().item():.4f}")
+        self.logger.debug(f"Input IDs sample: {input_ids[0, :10].tolist()}")
         self.logger.debug(f"Attention mask stats - min: {attention_mask.min().item()}, max: {attention_mask.max().item()}, mean: {attention_mask.float().mean().item():.4f}")
         with torch.no_grad():
             text_encoder_output = self.text_encoder(input_ids, attention_mask=attention_mask)
         last_hidden_state = text_encoder_output.last_hidden_state
+        self.logger.debug(f"Last hidden state shape:{last_hidden_state.shape}")
         last_hidden_state = torch.nan_to_num(last_hidden_state, nan=0.0, posinf=1.0, neginf=-1.0)
         self.logger.debug(f"Last hidden state stats - min: {last_hidden_state.min().item():.4f}, max: {last_hidden_state.max().item():.4f}, mean: {last_hidden_state.mean().item():.4f}")
         prompt_embeds = last_hidden_state.mean(dim=1)
@@ -219,7 +221,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             prompt_embeds = prompt_embeds / std.clamp(min=1e-6)
         else:
             self.logger.warning("Zero or near-zero std in prompt_embeds. Using random embeddings.")
-            prompt_embeds = torch.randn_like(prompt_embeds) * 0.01  # Small random noise
+            prompt_embeds = torch.randn_like(prompt_embeds) * 0.1  # Increased noise scale
         self.logger.debug(f"Prompt embeds after norm stats - min: {prompt_embeds.min().item():.4f}, max: {prompt_embeds.max().item():.4f}, mean: {prompt_embeds.mean().item():.4f}")
         prompt_embeds = self.projection_layer(prompt_embeds)
         prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -245,7 +247,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
                 negative_embeds_pooled = negative_embeds_pooled / std_neg.clamp(min=1e-6)
             else:
                 self.logger.warning("Zero or near-zero std in negative_embeds_pooled. Using random embeddings.")
-                negative_embeds_pooled = torch.randn_like(negative_embeds_pooled) * 0.01
+                negative_embeds_pooled = torch.randn_like(negative_embeds_pooled) * 0.1
             negative_embeds_projected = self.projection_layer(negative_embeds_pooled)
             negative_embeds_projected = torch.nan_to_num(negative_embeds_projected, nan=0.0, posinf=1.0, neginf=-1.0)
             negative_embeds = negative_embeds_projected.unsqueeze(1).repeat(1, text_sequence_length, 1)
@@ -378,10 +380,17 @@ class FinetuneModel:
         prior_model_id = "kandinsky-community/kandinsky-2-2-prior"
         decoder_model_id = "kandinsky-community/kandinsky-2-2-decoder"
         try:
-            self.tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
-            self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name)
+            # Force redownload to ensure fresh model
+            self.tokenizer = T5Tokenizer.from_pretrained(t5_model_name, force_download=True)
+            self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, force_download=True)
             self.text_encoder.to(self.device)
-            self.text_encoder.gradient_checkpointing_enable()
+            # self.text_encoder.gradient_checkpointing_enable() #Since LoRA is off for the text encoder, gradient checkpointing provides no benefit and might cause issues.
+            # Test text encoder
+            test_inputs = self.tokenizer(["test prompt"], padding="max_length", max_length=77, truncation=True, return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                test_output = self.text_encoder(**test_inputs)
+            test_hidden_state = test_output.last_hidden_state
+            self.logger.debug(f"Test text encoder output - min: {test_hidden_state.min().item():.4f}, max: {test_hidden_state.max().item():.4f}, mean: {test_hidden_state.mean().item():.4f}")
             prior = PriorTransformer.from_pretrained(prior_model_id, subfolder="prior").to(dtype=self.dtype)
             self.logger.warning("PriorTransformer does not support gradient checkpointing; skipping")
             prior_scheduler = DPMSolverMultistepScheduler.from_pretrained(prior_model_id, subfolder="scheduler")
@@ -407,7 +416,7 @@ class FinetuneModel:
             self.logger.error(f"Failed to load model components: {e}\n{traceback.format_exc()}")
             raise
 
-    def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_text_encoder=True):
+    def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_text_encoder=False):  # Disable LoRA for text encoder
         self._apply_lora_text_flag = apply_lora_to_text_encoder
         self._apply_lora_unet_flag = apply_lora_to_unet
         lora_r = 8; lora_alpha = 16; lora_dropout = 0.1; lora_bias = "none"
@@ -451,6 +460,7 @@ class FinetuneModel:
                 try:
                     image_filenames = batch.get('image')
                     prompts = batch.get('prompt')
+                    self.logger.debug(f"Val Step {step+1}: Prompts: {prompts}")
                     if not image_filenames or not prompts or \
                        not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
                         self.logger.warning(f"Val Step {step+1}: Invalid prompts or image filenames")
@@ -583,6 +593,10 @@ class FinetuneModel:
         if not save_paths: self.logger.warning(f"No trainable weights were saved for {self.model_name} ({save_label}).")
 
     def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8):
+        # Enforce learning rate cap
+        if learning_rate > 5e-8:
+            self.logger.warning(f"High learning rate detected: {learning_rate}. Capping at 5e-8 for stability.")
+            learning_rate = 5e-8
         fold_val_losses = []
         global_best_avg_val_loss = float('inf')
         global_best_model_state = None
@@ -681,6 +695,12 @@ class FinetuneModel:
                             # Debug mode for step 16
                             if step + 1 == 16:
                                 self.logger.debug(f"Train Step {step+1}: Detailed debug mode activated")
+
+                            # --- START T5 Eval Mode Fix --- Since you are not fine-tuning the T5 encoder in this configuration (apply_lora_text_encoder=False), try explicitly setting it to evaluation mode before the prior_pipeline call within the training loop, just in case its state (e.g., dropout layers) is causing issues.
+                            if hasattr(self.prior_pipeline, 'text_encoder'):
+                                self.prior_pipeline.text_encoder.eval()
+                                self.logger.debug(f"Set text_encoder to eval mode for prior pipeline call.")
+                            # --- END T5 Eval Mode Fix ---
                             with self.accelerator.accumulate(self.unet):
                                 with torch.cuda.amp.autocast():
                                     prior_output = self.prior_pipeline(
@@ -747,7 +767,7 @@ class FinetuneModel:
                                         try:
                                             raw_grad_norm = torch.norm(torch.stack([torch.norm(p.grad, 2) for p in params_to_optimize if p.grad is not None]), 2)
                                             self.logger.debug(f"Train Step {step+1}: Raw gradient norm: {raw_grad_norm.item():.4f}")
-                                            grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 0.05)
+                                            grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 1.0)
                                             self.logger.debug(f"Train Step {step+1}: Clipped gradient norm: {grad_norm.item():.4f}")
                                             scaler_state = self.accelerator.scaler.get_state()
                                             self.logger.debug(f"Train Step {step+1}: Gradient scaler state - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
@@ -755,7 +775,9 @@ class FinetuneModel:
                                             self.logger.warning(f"Train Step {step+1}: Skipping optimizer step due to NaN/Inf gradients")
                                             valid_gradients = False
                                             self.logger.debug(f"Train Step {step+1}: Invalid gradients detected")
-                                            scaler_state = self.accelerator.scaler.get_state()
+                                            scaler_state = self.accelerator.scaler.state_dict()
+                                            current_scale = self.accelerator.scaler.get_scale()
+                                            self.logger.debug(f"Train Step {step+1}: Gradient scaler scale on failure: {current_scale}")
                                             self.logger.debug(f"Train Step {step+1}: Gradient scaler state on failure - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
                                         if valid_gradients and not torch.isnan(grad_norm) and not torch.isinf(grad_norm):
                                             self.optimizer.step()
@@ -820,13 +842,10 @@ if __name__ == "__main__":
     epochs = config.get('epochs', 5)
     batch_size = config.get('batch_size', 1)
     learning_rate = config.get('learning_rate', 5e-8)
-    if learning_rate > 5e-8:
-        logger.warning(f"High learning rate in config: {learning_rate}. Capping at 5e-8 for stability.")
-        learning_rate = 5e-8
     gradient_accumulation_steps = config.get('gradient_accumulation_steps', 8)
     num_folds = config.get('num_folds', 5)
     apply_lora_unet = config.get('apply_lora_unet', True)
-    apply_lora_text_encoder = config.get('apply_lora_text_encoder', True)
+    apply_lora_text_encoder = config.get('apply_lora_text_encoder', False)
     os.makedirs(output_dir, exist_ok=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
