@@ -90,6 +90,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         self.logger = logger_instance or logging.getLogger(__name__)
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
+        self.tokenizer.model_max_length = 512  # Force set to reasonable value
         self.prior_embed_dim = getattr(prior.config, 'embedding_dim', 1280)
         self.projection_layer = nn.Linear(768, self.prior_embed_dim).to(
             device=self.prior.device, dtype=self.prior.dtype
@@ -100,14 +101,20 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         if not hasattr(self.prior, 'logger'):
             self.prior.logger = self.logger
 
-        # Add hook to debug attention scores in block 1
+        # Add hooks for debugging
         def attention_hook(module, input, output):
             attn_scores = output[1] if isinstance(output, tuple) else output
             self.logger.debug(f"T5 block 1 attention scores stats - min: {attn_scores.min().item():.4f}, max: {attn_scores.max().item():.4f}, mean: {attn_scores.mean().item():.4f}")
             return output
 
+        def dense_relu_dense_hook(module, input, output):
+            output = output / 1000.0  # Stronger scaling
+            self.logger.debug(f"T5 block 1 DenseReluDense output stats - min: {output.min().item():.4f}, max: {output.max().item():.4f}, mean: {output.mean().item():.4f}")
+            return output
+
         if hasattr(self.text_encoder, 'encoder') and len(self.text_encoder.encoder.block) > 1:
             self.text_encoder.encoder.block[1].register_forward_hook(attention_hook)
+            self.text_encoder.encoder.block[1].layer[1].DenseReluDense.register_forward_hook(dense_relu_dense_hook)
 
         def custom_forward(
             self_prior,
@@ -202,14 +209,16 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         if not all(isinstance(p, str) and p.strip() for p in prompt):
             self.logger.warning(f"Invalid prompts detected: {prompt}. Using default prompt.")
             prompt = ["a generic description"] * batch_size
+        self.logger.debug(f"Tokenizer model_max_length: {self.tokenizer.model_max_length}")
         text_inputs = self.tokenizer(
-            prompt, padding="max_length", max_length=self.tokenizer.model_max_length,
+            prompt, padding="max_length", max_length=512,  # Explicitly set max_length
             truncation=True, return_tensors="pt",
         ).to(device)
         input_ids = text_inputs.input_ids
         attention_mask = text_inputs.attention_mask
         self.logger.debug(f"Input IDs stats - min: {input_ids.min().item()}, max: {input_ids.max().item()}, mean: {input_ids.float().mean().item():.4f}")
         self.logger.debug(f"Input IDs sample: {input_ids[0, :10].tolist()}")
+        self.logger.debug(f"Input IDs length: {input_ids.shape[1]}")
         self.logger.debug(f"Attention mask stats - min: {attention_mask.min().item()}, max: {attention_mask.max().item()}, mean: {attention_mask.float().mean().item():.4f}")
         # Debug T5 intermediate outputs without autocast
         with torch.no_grad():
@@ -217,8 +226,10 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             hidden_states = self.text_encoder.shared(input_ids)  # Embedding layer
             self.logger.debug(f"T5 embedding output stats - min: {hidden_states.min().item():.4f}, max: {hidden_states.max().item():.4f}, mean: {hidden_states.mean().item():.4f}")
             for i, block in enumerate(encoder.block):
-                hidden_states = block(hidden_states, attention_mask=attention_mask)[0]
-                hidden_states = torch.clamp(hidden_states, min=-1e4, max=1e4)  # Prevent inf
+                # Stronger normalization before layer norm
+                hidden_states = hidden_states / (hidden_states.std(dim=-1, keepdim=True).clamp(min=1e-6) * 50.0)
+                hidden_states = block(hidden_states, attention_mask=attention_mask)[0] / 1000.0  # Stronger block scaling
+                hidden_states = torch.clamp(hidden_states, min=-500.0, max=500.0)  # Tighter clamp
                 self.logger.debug(f"T5 block {i} output stats - min: {hidden_states.min().item():.4f}, max: {hidden_states.max().item():.4f}, mean: {hidden_states.mean().item():.4f}")
             text_encoder_output = hidden_states
         last_hidden_state = text_encoder_output
@@ -231,7 +242,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         self.logger.debug(f"Prompt embeds before norm stats - min: {prompt_embeds.min().item():.4f}, max: {prompt_embeds.max().item():.4f}, mean: {prompt_embeds.mean().item():.4f}")
         std = prompt_embeds.std(dim=1, keepdim=True)
         if (std > 1e-6).all():
-            prompt_embeds = prompt_embeds / std.clamp(min=1e-6)
+            prompt_embeds = prompt_embeds / (std.clamp(min=1e-6) * 10.0)  # Extra scaling
         else:
             self.logger.warning("Zero or near-zero std in prompt_embeds. Using random embeddings.")
             prompt_embeds = torch.randn_like(prompt_embeds) * 0.05
@@ -244,11 +255,12 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             negative_prompt = negative_prompt or [""] * batch_size
             if isinstance(negative_prompt, str): negative_prompt = [negative_prompt] * batch_size
             negative_inputs = self.tokenizer(
-                negative_prompt, padding="max_length", max_length=self.tokenizer.model_max_length,
+                negative_prompt, padding="max_length", max_length=512,  # Explicitly set max_length
                 truncation=True, return_tensors="pt",
             ).to(device)
             negative_input_ids = negative_inputs.input_ids
             negative_attention_mask = negative_inputs.attention_mask
+            self.logger.debug(f"Negative Input IDs length: {negative_input_ids.shape[1]}")
             with torch.no_grad():
                 negative_output = self.text_encoder(negative_input_ids, attention_mask=negative_attention_mask)
             negative_embeds_pooled = negative_output.last_hidden_state.mean(dim=1)
@@ -256,7 +268,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             negative_embeds_pooled = negative_embeds_pooled.to(target_dtype)
             std_neg = negative_embeds_pooled.std(dim=1, keepdim=True)
             if (std_neg > 1e-6).all():
-                negative_embeds_pooled = negative_embeds_pooled / std_neg.clamp(min=1e-6)
+                negative_embeds_pooled = negative_embeds_pooled / (std_neg.clamp(min=1e-6) * 10.0)
             else:
                 self.logger.warning("Zero or near-zero std in negative_embeds_pooled. Using random embeddings.")
                 negative_embeds_pooled = torch.randn_like(negative_embeds_pooled) * 0.05
@@ -386,11 +398,18 @@ class FinetuneModel:
         self._apply_lora_unet_flag = False
 
     def load_model(self):
-        t5_model_name = "google/flan-t5-base"
+        t5_model_name = "t5-base"
         prior_model_id = "kandinsky-community/kandinsky-2-2-prior"
         decoder_model_id = "kandinsky-community/kandinsky-2-2-decoder"
         try:
+            # Clear cache to ensure clean download
+            cache_dir = "/home/iris/.cache/huggingface/hub/models--t5-base"
+            if os.path.exists(cache_dir):
+                import shutil
+                shutil.rmtree(cache_dir)
             self.tokenizer = T5Tokenizer.from_pretrained(t5_model_name, force_download=True)
+            self.tokenizer.model_max_length = 512  # Force set
+            self.logger.debug(f"Tokenizer model_max_length set to: {self.tokenizer.model_max_length}")
             self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, force_download=True)
             self.text_encoder.to(self.device, dtype=self.dtype)
             self.text_encoder.gradient_checkpointing_enable()
@@ -430,11 +449,11 @@ class FinetuneModel:
             self.logger.error(f"Failed to load model components: {e}\n{traceback.format_exc()}")
             raise
 
-    def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_text_encoder=False):
+    def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_text_encoder=False, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self.logger.debug(f"Applying LoRA to text encoder: {apply_lora_to_text_encoder}")
         self._apply_lora_text_flag = apply_lora_to_text_encoder
         self._apply_lora_unet_flag = apply_lora_to_unet
-        lora_r = 8; lora_alpha = 16; lora_dropout = 0.1; lora_bias = "none"
+        lora_bias = "none"
         if apply_lora_to_unet and self.unet:
             unet_target_modules = ["to_q", "to_k", "to_v", "to_out.0", "proj_in", "proj_out", "ff.net.0.proj", "ff.net.2"]
             lora_config_unet = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=lora_bias, target_modules=unet_target_modules)
@@ -528,7 +547,7 @@ class FinetuneModel:
                     timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
                     noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
                     if torch.isnan(noisy_latents).any() or torch.isinf(noisy_latents).any():
-                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in noisy_latents")
+                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in noisy_lat -inf in noisy_latents")
                         continue
                     noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
                     noisy_latents = noisy_latents / noisy_latents.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
@@ -569,8 +588,9 @@ class FinetuneModel:
 
     def save_model_state(self, epoch=None, val_loss=None, hyperparameters=None):
         if not self.accelerator.is_main_process: return
-        output_subdir = self.output_dir; os.makedirs(output_subdir, exist_ok=True)
-        save_label="best"
+        output_subdir = self.output_dir
+        os.makedirs(output_subdir, exist_ok=True)
+        save_label = "best"
         val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) else "N/A"
         save_paths = {}
         if self.unet and isinstance(self.unet, PeftModel):
@@ -578,13 +598,17 @@ class FinetuneModel:
                 unet_path = os.path.join(output_subdir, f"{save_label}_unet_lora")
                 self.accelerator.unwrap_model(self.unet).save_pretrained(unet_path)
                 save_paths["UNet_LoRA"] = unet_path
-            except Exception as e: self.logger.error(f"Failed save UNet LoRA: {e}")
+                self.logger.info(f"Saved UNet LoRA to {unet_path}")
+            except Exception as e:
+                self.logger.error(f"Failed save UNet LoRA: {e}")
         if hasattr(self.prior_pipeline, 'text_encoder') and isinstance(self.prior_pipeline.text_encoder, PeftModel):
             try:
                 text_encoder_path = os.path.join(output_subdir, f"{save_label}_text_encoder_lora")
                 self.accelerator.unwrap_model(self.prior_pipeline.text_encoder).save_pretrained(text_encoder_path)
                 save_paths["TextEncoder_LoRA"] = text_encoder_path
-            except Exception as e: self.logger.error(f"Failed save TextEncoder LoRA: {e}")
+                self.logger.info(f"Saved TextEncoder LoRA to {text_encoder_path}")
+            except Exception as e:
+                self.logger.error(f"Failed save TextEncoder LoRA: {e}")
         if hasattr(self.prior_pipeline, 'projection_layer'):
             is_proj_trainable = any(p.requires_grad for p in self.prior_pipeline.projection_layer.parameters())
             if is_proj_trainable:
@@ -593,25 +617,30 @@ class FinetuneModel:
                     proj_state_dict = self.accelerator.get_state_dict(self.prior_pipeline.projection_layer)
                     torch.save(proj_state_dict, proj_layer_path)
                     save_paths["Projection_Layer"] = proj_layer_path
-                except Exception as e: self.logger.error(f"Failed save Projection Layer: {e}")
+                    self.logger.info(f"Saved Projection Layer to {proj_layer_path}")
+                except Exception as e:
+                    self.logger.error(f"Failed save Projection Layer: {e}")
         if hyperparameters:
             hyperparameters['_apply_lora_text_encoder'] = self._apply_lora_text_flag
             hyperparameters['_apply_lora_unet'] = self._apply_lora_unet_flag
             hyperparam_path = os.path.join(output_subdir, f"{save_label}_hyperparameters.json")
             save_data = { 'model_name': self.model_name, 'epoch': epoch, 'validation_loss': val_loss_str, 'hyperparameters': hyperparameters }
             try:
-                with open(hyperparam_path, 'w') as f: json.dump(save_data, f, indent=4)
-            except Exception as e: self.logger.error(f"Failed save hyperparameters: {e}")
-        if not save_paths: self.logger.warning(f"No trainable weights were saved for {self.model_name} ({save_label}).")
+                with open(hyperparam_path, 'w') as f:
+                    json.dump(save_data, f, indent=4)
+                self.logger.info(f"Saved hyperparameters to {hyperparam_path}")
+            except Exception as e:
+                self.logger.error(f"Failed save hyperparameters: {e}")
+        if not save_paths:
+            self.logger.warning(f"No trainable weights were saved for {self.model_name} ({save_label}).")
 
-    def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8):
+    def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self.logger.info(f"Requested learning rate: {learning_rate}")
         if learning_rate > 5e-8:
             self.logger.warning(f"High learning rate detected: {learning_rate}. Capping at 5e-8 for stability.")
             learning_rate = 5e-8
         fold_val_losses = []
         global_best_avg_val_loss = float('inf')
-        global_best_model_state = None
         global_best_hyperparameters = None
         global_best_epoch = -1
         for fold_idx, (train_dataset, val_dataset) in enumerate(train_val_splits):
@@ -634,7 +663,8 @@ class FinetuneModel:
                         if proj_params_to_add:
                             params_to_optimize.extend(proj_params_to_add)
                 if not params_to_optimize:
-                    self.logger.error("Optimizer params list is empty!"); continue
+                    self.logger.error("Optimizer params list is empty!")
+                    continue
                 params_to_optimize = list({id(p): p for p in params_to_optimize}.values())
                 try:
                     optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
@@ -647,11 +677,13 @@ class FinetuneModel:
                 prepare_list = []
                 models_prepared_names = []
                 if self._apply_lora_unet_flag and isinstance(self.unet, PeftModel):
-                    prepare_list.append(self.unet); models_prepared_names.append("unet")
+                    prepare_list.append(self.unet)
+                    models_prepared_names.append("unet")
                 prepare_list.extend([optimizer, train_dataloader, val_dataloader])
                 prepared_components = self.accelerator.prepare(*prepare_list)
                 component_iter = iter(prepared_components)
-                if "unet" in models_prepared_names: self.unet = next(component_iter)
+                if "unet" in models_prepared_names:
+                    self.unet = next(component_iter)
                 self.optimizer = next(component_iter)
                 train_dataloader = next(component_iter)
                 val_dataloader = next(component_iter)
@@ -660,7 +692,19 @@ class FinetuneModel:
                 self.vae.eval()
                 self.accelerator.scaler._growth_factor = 1.1
                 t5_model_name = getattr(self.prior_pipeline.text_encoder.config, "_name_or_path", "Unknown T5")
-                hyperparameters = { 'model_name': self.model_name, 'text_encoder': t5_model_name, 'epochs': epochs, 'batch_size': batch_size, 'learning_rate': learning_rate, 'gradient_accumulation_steps': gradient_accumulation_steps, 'lora_r': 8, 'lora_alpha': 16, 'lora_dropout': 0.1, 'apply_lora_text_encoder': self._apply_lora_text_flag, 'apply_lora_unet': self._apply_lora_unet_flag }
+                hyperparameters = {
+                    'model_name': self.model_name,
+                    'text_encoder': t5_model_name,
+                    'epochs': epochs,
+                    'batch_size': batch_size,
+                    'learning_rate': learning_rate,
+                    'gradient_accumulation_steps': gradient_accumulation_steps,
+                    'lora_r': lora_r,
+                    'lora_alpha': lora_alpha,
+                    'lora_dropout': lora_dropout,
+                    'apply_lora_text_encoder': self._apply_lora_text_flag,
+                    'apply_lora_unet': self._apply_lora_unet_flag
+                }
                 num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
                 max_train_steps = epochs * num_update_steps_per_epoch
                 global_step = 0
@@ -817,9 +861,11 @@ class FinetuneModel:
                     self.accelerator.wait_for_everyone()
                     gc.collect()
                     torch.cuda.empty_cache()
-                if self.accelerator.is_main_process:
-                    valid_fold_loss = self.best_val_loss if not np.isnan(self.best_val_loss) else float('inf')
-                    fold_val_losses.append(valid_fold_loss)
+                fold_val_losses.append(self.best_val_loss if not np.isnan(self.best_val_loss) else float('inf'))
+                if self.best_val_loss < global_best_avg_val_loss:
+                    global_best_avg_val_loss = self.best_val_loss
+                    global_best_hyperparameters = hyperparameters
+                    global_best_epoch = self.best_epoch
             except Exception as e:
                 self.logger.error(f"Fold {fold_idx + 1} failed entirely: {e}\n{traceback.format_exc()}")
                 fold_val_losses.append(float('inf'))
@@ -828,17 +874,18 @@ class FinetuneModel:
             valid_losses = [loss for loss in fold_val_losses if loss != float('inf')]
             avg_val_loss = np.mean(valid_losses) if valid_losses else float('inf')
             self.logger.info(f"Training Finished - Avg validation loss: {avg_val_loss:.4f} across {len(valid_losses)} valid folds")
-        return avg_val_loss, None, None, None
+            self.save_model_state(epoch=global_best_epoch, val_loss=avg_val_loss, hyperparameters=global_best_hyperparameters)
+        return avg_val_loss, None, global_best_hyperparameters, global_best_epoch
 
 # --- Main Execution Placeholder ---
 if __name__ == "__main__":
     logger.info("Script execution started.")
-    CONFIG_PATH = "config.yaml"
+    CONFIG_PATH = "/home/iris/Documents/deep_learning/config/config.yaml"
     config = load_config(CONFIG_PATH)
     if config is None:
         logger.error("Exiting due to missing or invalid configuration.")
         exit(1)
-    output_dir = config.get('output_dir', './output')
+    output_dir = config.get('base_output_dir', './output')
     model_name = config.get('model_name', 'kandinsky')
     dataset_path = config.get('dataset_path', None)
     if not dataset_path:
@@ -848,9 +895,12 @@ if __name__ == "__main__":
     batch_size = config.get('batch_size', 1)
     learning_rate = config.get('learning_rate', 5e-8)
     gradient_accumulation_steps = config.get('gradient_accumulation_steps', 8)
-    num_folds = config.get('num_folds', 5)
+    num_folds = config.get('k_folds', 5)
     apply_lora_unet = config.get('apply_lora_unet', True)
     apply_lora_text_encoder = config.get('apply_lora_text_encoder', False)
+    lora_r = config.get('lora_r', 8)
+    lora_alpha = config.get('lora_alpha', 16)
+    lora_dropout = config.get('lora_dropout', 0.1)
     os.makedirs(output_dir, exist_ok=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -874,18 +924,25 @@ if __name__ == "__main__":
         finetuner.load_model()
         finetuner.modify_architecture(
             apply_lora_to_unet=apply_lora_unet,
-            apply_lora_to_text_encoder=apply_lora_text_encoder
+            apply_lora_to_text_encoder=apply_lora_text_encoder,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout
         )
-        avg_loss, _, _, _ = finetuner.fine_tune(
+        avg_loss, _, hyperparams, best_epoch = finetuner.fine_tune(
             dataset_path=dataset_path,
             train_val_splits=train_val_splits_data,
             epochs=epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
-            gradient_accumulation_steps=gradient_accumulation_steps
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout
         )
         if accelerator.is_main_process:
             logger.info(f"Fine-tuning completed. Average validation loss: {avg_loss}")
+            finetuner.save_model_state(epoch=best_epoch, val_loss=avg_loss, hyperparameters=hyperparams)
     except Exception as e:
         logger.error(f"Fine-tuning process failed: {e}\n{traceback.format_exc()}")
         accelerator.set_trace()
