@@ -470,10 +470,18 @@ class FinetuneModel:
             self.logger.info("Loading T5 Encoder Model...")
             self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name)
             self.text_encoder.to(self.device)
+            self.text_encoder.gradient_checkpointing_enable()
             self.logger.info(f"Moved T5 Encoder to device: {self.text_encoder.device}")
 
+            # In the load_model method, after loading the prior
             self.logger.info("Loading Prior components...")
-            prior = PriorTransformer.from_pretrained(prior_model_id, subfolder="prior")
+            prior = PriorTransformer.from_pretrained(prior_model_id, subfolder="prior").to(dtype=self.dtype)
+            # Add debug print for PriorTransformer layers
+            self.logger.info("PriorTransformer attributes and modules:")
+            prior_attributes = [attr for attr in dir(prior) if not attr.startswith('_')]
+            self.logger.info(f"Attributes: {prior_attributes}")
+            self.logger.info(f"Modules: {list(prior.named_modules())}")
+            self.logger.info(f"State dict keys: {list(prior.state_dict().keys())}")
             prior_scheduler = DPMSolverMultistepScheduler.from_pretrained(prior_model_id, subfolder="scheduler")
             try:
                  image_encoder = CLIPVisionModelWithProjection.from_pretrained(prior_model_id, subfolder="image_encoder")
@@ -502,8 +510,17 @@ class FinetuneModel:
             self.vae = VQModel.from_pretrained(decoder_model_id, subfolder="movq").to(device=self.device, dtype=torch.float32)
             self.vae.eval()
             self.unet = UNet2DConditionModel.from_pretrained(decoder_model_id, subfolder="unet").to(device=self.device, dtype=self.dtype)
+            # Check if enable_gradient_checkpointing is available
+            if hasattr(self.unet, 'enable_gradient_checkpointing'):
+                self.unet.enable_gradient_checkpointing()
+                self.logger.info(f"UNet gradient checkpointing enabled")
+            else:
+                self.logger.warning("UNet does not support enable_gradient_checkpointing; skipping")
             self.scheduler = DPMSolverMultistepScheduler.from_pretrained(decoder_model_id, subfolder="scheduler")
             self.logger.info(f"Loaded Decoder components. VAE(f32): {self.vae.device}, UNet({self.dtype}): {self.unet.device}")
+
+            # Log UNet configuration to check out_channels
+            self.logger.info(f"UNet configuration: out_channels={self.unet.config.out_channels}")
 
             self.logger.info("Finished loading all components.")
 
@@ -623,6 +640,11 @@ class FinetuneModel:
                         encoder_hidden_states=None,
                         added_cond_kwargs=added_cond_kwargs
                     ).sample
+
+                    # Slice model_pred to match noise channels (first 4 channels)
+                    if model_pred.shape[1] == 8 and noise.shape[1] == 4:
+                        self.logger.debug("Slicing model_pred from 8 to 4 channels to match noise.")
+                        model_pred = model_pred[:, :4, :, :]
 
                     val_loss = torch.nn.functional.mse_loss(model_pred.float(), noise.float(), reduction="mean")
 
@@ -819,39 +841,46 @@ class FinetuneModel:
                             prompts = valid_prompts
 
                             with self.accelerator.accumulate(self.unet):
-                                prior_output = self.prior_pipeline(
-                                    prompt=prompts,
-                                    num_inference_steps=25,
-                                    generator=torch.Generator(device=self.accelerator.device).manual_seed(42 + global_step)
-                                )
-                                image_embeds = prior_output.image_embeds.to(dtype=self.dtype)
+                                with torch.cuda.amp.autocast():
+                                    prior_output = self.prior_pipeline(
+                                        prompt=prompts,
+                                        num_inference_steps=25,
+                                        generator=torch.Generator(device=self.accelerator.device).manual_seed(42 + global_step)
+                                    )
+                                    image_embeds = prior_output.image_embeds.to(dtype=self.dtype)
 
-                                with torch.no_grad():
-                                     pixel_values_f32 = pixel_values.to(dtype=torch.float32) * 2.0 - 1.0
-                                     vae_output = self.vae.encode(pixel_values_f32)
-                                     latents = vae_output.latents * getattr(self.vae.config, 'scaling_factor', 0.18215)
-                                     latents = latents.to(dtype=self.dtype)
+                                    with torch.no_grad():
+                                        pixel_values_f32 = pixel_values.to(dtype=torch.float32) * 2.0 - 1.0
+                                        vae_output = self.vae.encode(pixel_values_f32)
+                                        latents = vae_output.latents * getattr(self.vae.config, 'scaling_factor', 0.18215)
+                                        latents = latents.to(dtype=self.dtype)
 
-                                if torch.isnan(latents).any() or torch.isinf(latents).any():
-                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf latents detected. Skipping.")
-                                    continue
+                                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf latents detected. Skipping.")
+                                        continue
 
-                                noise = torch.randn_like(latents)
-                                timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
-                                noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+                                    noise = torch.randn_like(latents)
+                                    timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
+                                    noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
 
-                                added_cond_kwargs = {"image_embeds": image_embeds.to(self.dtype)}
-                                self.logger.debug(f"Calling UNet with noisy_latents shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}")
-                                self.logger.debug(f"UNet added_cond_kwargs['image_embeds'] shape: {added_cond_kwargs['image_embeds'].shape}, dtype: {added_cond_kwargs['image_embeds'].dtype}")
+                                    added_cond_kwargs = {"image_embeds": image_embeds.to(self.dtype)}
+                                    self.logger.debug(f"Calling UNet with noisy_latents shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}")
+                                    self.logger.debug(f"UNet added_cond_kwargs['image_embeds'] shape: {added_cond_kwargs['image_embeds'].shape}, dtype: {added_cond_kwargs['image_embeds'].dtype}")
 
-                                model_pred = self.unet(
-                                    sample=noisy_latents,
-                                    timestep=timesteps,
-                                    encoder_hidden_states=None,
-                                    added_cond_kwargs=added_cond_kwargs
-                                ).sample
+                                    model_pred = self.unet(
+                                        sample=noisy_latents,
+                                        timestep=timesteps,
+                                        encoder_hidden_states=None,
+                                        added_cond_kwargs=added_cond_kwargs
+                                    ).sample
 
-                                loss = torch.nn.functional.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+                                    # Slice model_pred to match noise channels (first 4 channels)
+                                    self.logger.debug(f"model_pred shape before slicing: {model_pred.shape}, noise shape: {noise.shape}")
+                                    if model_pred.shape[1] == 8 and noise.shape[1] == 4:
+                                        self.logger.debug("Slicing model_pred from 8 to 4 channels to match noise.")
+                                        model_pred = model_pred[:, :4, :, :]
+
+                                    loss = torch.nn.functional.mse_loss(model_pred.float(), noise.float(), reduction="mean")
 
                                 self.accelerator.backward(loss / gradient_accumulation_steps)
 
@@ -948,7 +977,8 @@ if __name__ == "__main__":
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         log_with="tensorboard",
-        project_dir=os.path.join(output_dir, "logs")
+        project_dir=os.path.join(output_dir, "logs"),
+        mixed_precision="fp16"  # Enable mixed precision
     )
     logger.info(f"Accelerator initialized on device: {accelerator.device}")
     logging.getLogger().setLevel(logging.DEBUG if accelerator.is_main_process else logging.ERROR)
