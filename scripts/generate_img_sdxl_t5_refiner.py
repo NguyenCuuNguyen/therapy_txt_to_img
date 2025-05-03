@@ -127,13 +127,14 @@ def find_checkpoint_dirs(base_model_dir):
     return checkpoints
 
 def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, device, target_dtype):
-    logger.info(f"Loading base model components for {model_name}...")
+    logger.info(f"Loading base and refiner model components for {model_name}...")
     pipeline = None
 
     try:
         if model_name == "sdxl_base_refiner":
             t5_model_name = "t5-base"
             base_model_id = base_model_ids["sdxl"]
+            refiner_model_id = "stabilityai/stable-diffusion-xl-refiner-1.0"
 
             logger.info("Loading base components...")
             tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
@@ -149,6 +150,10 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
             torch.cuda.empty_cache()
 
             unet = UNet2DConditionModel.from_pretrained(base_model_id, subfolder="unet")
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            refiner_unet = UNet2DConditionModel.from_pretrained(refiner_model_id, subfolder="unet")
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -168,24 +173,24 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                 logger.info(f"Loading projection layer from {projection_layer_path}")
                 projection_layer = torch.nn.Linear(768, 2048)
                 projection_layer.load_state_dict(torch.load(projection_layer_path))
-                projection_layer.to(device)  # Move to GPU
+                projection_layer.to(device, dtype=target_dtype)
                 logger.info("Loaded projection layer.")
             else:
                 logger.info("No projection layer file found; using default initialization.")
-                projection_layer = torch.nn.Linear(768, 2048).to(device)
+                projection_layer = torch.nn.Linear(768, 2048).to(device, dtype=target_dtype)
 
             if pool_projection_layer_files:
                 pool_projection_layer_path = os.path.join(lora_checkpoint_dir, pool_projection_layer_files[0])
                 logger.info(f"Loading pool projection layer from {pool_projection_layer_path}")
                 pool_projection_layer = torch.nn.Linear(768, 1280)
                 pool_projection_layer.load_state_dict(torch.load(pool_projection_layer_path))
-                pool_projection_layer.to(device)  # Move to GPU
+                pool_projection_layer.to(device, dtype=target_dtype)
                 logger.info("Loaded pool projection layer.")
             else:
                 logger.info("No pool projection layer file found; using default initialization.")
-                pool_projection_layer = torch.nn.Linear(768, 1280).to(device)
+                pool_projection_layer = torch.nn.Linear(768, 1280).to(device, dtype=target_dtype)
 
-            logger.info("Initializing SDXL T5 pipeline...")
+            logger.info("Initializing SDXL T5 pipeline with base and refiner UNets...")
             pipeline = StableDiffusionXLPipelineWithT5(
                 vae=vae,
                 text_encoder=text_encoder,
@@ -194,7 +199,7 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                 scheduler=scheduler,
                 projection_layer=projection_layer,
                 pool_projection_layer=pool_projection_layer,
-                refiner_unet=None,  # No refiner UNet
+                refiner_unet=refiner_unet,
                 logger_instance=logger
             )
 
@@ -204,15 +209,25 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
 
             logger.info(f"Searching for LoRA weight directories in: {lora_checkpoint_dir}")
             unet_lora_dirs = [d for d in os.listdir(lora_checkpoint_dir) if os.path.isdir(os.path.join(lora_checkpoint_dir, d)) and d.endswith("_unet_lora")]
+            refiner_unet_lora_dirs = [d for d in os.listdir(lora_checkpoint_dir) if os.path.isdir(os.path.join(lora_checkpoint_dir, d)) and d.endswith("_refiner_unet_lora")]
 
             if unet_lora_dirs:
                 unet_lora_path = os.path.join(lora_checkpoint_dir, unet_lora_dirs[0])
-                logger.info(f"Found UNet LoRA directory: {unet_lora_path}")
-                logger.info(f"Loading UNet LoRA weights using PeftModel...")
+                logger.info(f"Found base UNet LoRA directory: {unet_lora_path}")
+                logger.info(f"Loading base UNet LoRA weights using PeftModel...")
                 pipeline.unet = PeftModel.from_pretrained(pipeline.unet, unet_lora_path)
-                logger.info("Loaded UNet LoRA weights.")
+                logger.info("Loaded base UNet LoRA weights.")
             else:
-                logger.warning(f"No UNet LoRA directory found in {lora_checkpoint_dir}")
+                logger.warning(f"No base UNet LoRA directory found in {lora_checkpoint_dir}")
+
+            if refiner_unet_lora_dirs:
+                refiner_unet_lora_path = os.path.join(lora_checkpoint_dir, refiner_unet_lora_dirs[0])
+                logger.info(f"Found refiner UNet LoRA directory: {refiner_unet_lora_path}")
+                logger.info(f"Loading refiner UNet LoRA weights using PeftModel...")
+                pipeline.refiner_unet = PeftModel.from_pretrained(pipeline.refiner_unet, refiner_unet_lora_path)
+                logger.info("Loaded refiner UNet LoRA weights.")
+            else:
+                logger.warning(f"No refiner UNet LoRA directory found in {lora_checkpoint_dir}")
 
             # Move pipeline to GPU
             pipeline.to(device)
@@ -273,6 +288,7 @@ def generate_images(
 
     num_inference_steps = gen_hyperparams.get("num_inference_steps", 30)
     guidance_scale = gen_hyperparams.get("guidance_scale", 7.5)
+    refiner_steps = gen_hyperparams.get("refiner_steps", 10)  # Number of refiner steps
 
     pos_quality_boost = ", sharp focus, highly detailed, intricate details, clear, high resolution, masterpiece, 8k"
     neg_quality_boost = "blurry, blurred, smudged, low quality, worst quality, unclear, fuzzy, out of focus, text, words, letters, signature, watermark, username, artist name, deformed, distorted, disfigured, poorly drawn, bad anatomy, extra limbs, missing limbs"
@@ -329,11 +345,15 @@ def generate_images(
                 generator = torch.Generator(device=device).manual_seed(42 + index + hash(variation_name))
                 image = None
                 with torch.no_grad():
+                    logger.info(f"Running base UNet for {num_inference_steps} steps and refiner UNet for {refiner_steps} steps")
                     image = pipeline(
                         prompt=prompt_to_generate,
                         negative_prompt=negative_prompt_boosted,
                         num_inference_steps=num_inference_steps,
                         guidance_scale=guidance_scale,
+                        refiner_steps=refiner_steps,
+                        height=img_size,
+                        width=img_size,
                         generator=generator,
                         output_type="pil"
                     ).images[0]
@@ -422,7 +442,11 @@ def main():
     models_to_generate = ["sdxl_base_refiner"]
 
     generation_param_sets = [
-        {"guidance_scale": 7.5, "num_inference_steps": 30},
+        {
+            "guidance_scale": 7.5,
+            "num_inference_steps": 30,
+            "refiner_steps": 10  # Added refiner steps
+        },
     ]
 
     for model_name in models_to_generate:
