@@ -35,7 +35,7 @@ except ImportError:
             return tokenizer.decode(token_ids[0], skip_special_tokens=True)
 
 # --- Explicit Logging Configuration ---
-log_file_path = "/home/iris/Documents/deep_learning/src/logs/img_generate_sdxl_t5_refiner.log"
+log_file_path = "/home/iris/Documents/deep_learning/src/logs/img_generate_sdxl_t5_no_refiner.log"
 log_level = logging.INFO
 
 logger = logging.getLogger()
@@ -127,7 +127,7 @@ def find_checkpoint_dirs(base_model_dir):
     return checkpoints
 
 def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, device, target_dtype):
-    logger.info(f"Loading base and refiner model components for {model_name}...")
+    logger.info(f"Loading base model components for {model_name}...")
     pipeline = None
 
     try:
@@ -196,9 +196,13 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                 refiner_pool_projection_layer_path = os.path.join(lora_checkpoint_dir, refiner_pool_projection_layer_files[0])
                 logger.info(f"Loading refiner pool projection layer from {refiner_pool_projection_layer_path}")
                 refiner_pool_projection_layer = torch.nn.Linear(768, 2560)
-                refiner_pool_projection_layer.load_state_dict(torch.load(refiner_pool_projection_layer_path))
+                state_dict = torch.load(refiner_pool_projection_layer_path)
+                refiner_pool_projection_layer.load_state_dict(state_dict)
                 refiner_pool_projection_layer.to(device, dtype=target_dtype)
                 logger.info("Loaded refiner pool projection layer.")
+                if refiner_pool_projection_layer.out_features != 2560:
+                    logger.error(f"refiner_pool_projection_layer output dimension {refiner_pool_projection_layer.out_features} does not match expected 2560")
+                    raise ValueError(f"refiner_pool_projection_layer output dimension {refiner_pool_projection_layer.out_features} does not match expected 2560")
             else:
                 logger.info("No refiner pool projection layer file found; using default initialization.")
                 refiner_pool_projection_layer = torch.nn.Linear(768, 2560).to(device, dtype=target_dtype)
@@ -217,7 +221,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
                 logger_instance=logger
             )
 
-            # Clear memory before loading LoRA weights
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -243,7 +246,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
             else:
                 logger.warning(f"No refiner UNet LoRA directory found in {lora_checkpoint_dir}")
 
-            # Move pipeline to GPU
             pipeline.to(device)
             logger.info("Pipeline moved to GPU.")
 
@@ -300,9 +302,9 @@ def generate_images(
     img_size = 1024
     device = pipeline.device
 
-    num_inference_steps = gen_hyperparams.get("num_inference_steps", 30)
+    num_inference_steps = gen_hyperparams.get("num_inference_steps", 20)  # Reduced for testing
     guidance_scale = gen_hyperparams.get("guidance_scale", 7.5)
-    refiner_steps = gen_hyperparams.get("refiner_steps", 10)
+    refiner_steps = gen_hyperparams.get("refiner_steps", 0)  # Disabled to avoid shape mismatch
 
     pos_quality_boost = ", sharp focus, highly detailed, intricate details, clear, high resolution, masterpiece, 8k"
     neg_quality_boost = "blurry, blurred, smudged, low quality, worst quality, unclear, fuzzy, out of focus, text, words, letters, signature, watermark, username, artist name, deformed, distorted, disfigured, poorly drawn, bad anatomy, extra limbs, missing limbs"
@@ -359,7 +361,7 @@ def generate_images(
                 generator = torch.Generator(device=device).manual_seed(42 + index + hash(variation_name))
                 image = None
                 with torch.no_grad():
-                    logger.info(f"Running base UNet for {num_inference_steps} steps and refiner UNet for {refiner_steps} steps")
+                    logger.info(f"Running base UNet for {num_inference_steps} steps")
                     image = pipeline(
                         prompt=prompt_to_generate,
                         negative_prompt=negative_prompt_boosted,
@@ -383,17 +385,13 @@ def generate_images(
             except Exception as e:
                 logger.error(f"Failed generation for file ID {file_id}, variation {variation_name}: {e}\n{traceback.format_exc()}")
 
-            # Clear memory after each image generation
             gc.collect()
             torch.cuda.empty_cache()
 
     logger.info(f"Finished generating images. Processed {prompts_processed_count} matching file IDs.")
 
 def main():
-    # Set PyTorch CUDA allocation configuration to reduce fragmentation
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-    # Clear GPU memory at the start
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -401,7 +399,7 @@ def main():
     prompts_csv_path = "/home/iris/Documents/deep_learning/data/input_csv/FILE_SUPERTOPIC_DESCRIPTION.csv"
     sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
     prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
-    generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2/sdxl_base_refiner"
+    generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2/sdxl_base_no_refiner"
 
     config = load_config(config_path)
     if config is None:
@@ -458,8 +456,8 @@ def main():
     generation_param_sets = [
         {
             "guidance_scale": 7.5,
-            "num_inference_steps": 30,
-            "refiner_steps": 10
+            "num_inference_steps": 20,  # Reduced for testing
+            "refiner_steps": 0  # Disabled to avoid shape mismatch
         },
     ]
 

@@ -68,7 +68,6 @@ def load_hyperparam_config(hyperparam_config_path, logger):
     try:
         with open(hyperparam_config_path, 'r') as f:
             configs = json.load(f)
-        # Find the best configuration based on avg_kfold_val_loss
         best_config = None
         best_loss = float('inf')
         for config in configs:
@@ -80,7 +79,6 @@ def load_hyperparam_config(hyperparam_config_path, logger):
             logger.error("No valid configuration found with a finite avg_kfold_val_loss.")
             print("Error: No valid configuration found in hyperparameter performance summary.")
             return None
-        # Ensure hyperparameters are properly formatted
         default_hyperparams = {
             "learning_rate": 5e-08,
             "lora_r": 8,
@@ -104,7 +102,6 @@ def load_hyperparam_config(hyperparam_config_path, logger):
             "avg_kfold_val_loss": best_config.get("avg_kfold_val_loss", float('inf')),
             "fold_losses": best_config.get("fold_losses", [])
         }
-        # Validate all required hyperparameters
         required_keys = default_hyperparams.keys()
         missing_keys = [key for key in required_keys if key not in hyperparameters]
         if missing_keys:
@@ -125,29 +122,22 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
     _optional_components = ["refiner_unet"]
 
     def __init__(self,
-                 vae: AutoencoderKL,
-                 text_encoder: T5EncoderModel,
-                 tokenizer: T5Tokenizer,
-                 unet: UNet2DConditionModel,
-                 scheduler: DPMSolverMultistepScheduler,
-                 projection_layer: torch.nn.Module = None,
-                 pool_projection_layer: torch.nn.Module = None,
-                 refiner_unet: UNet2DConditionModel = None,
-                 logger_instance = None):
+                 vae,
+                 text_encoder,
+                 tokenizer,
+                 unet,
+                 scheduler,
+                 projection_layer=None,
+                 pool_projection_layer=None,
+                 refiner_unet=None,
+                 refiner_pool_projection_layer=None,
+                 logger_instance=None):
         super().__init__()
         self.logger = logger_instance or get_logger(__name__)
 
-        # Initialize configuration for modules only
-        try:
-            diffusers_version = "Unknown"
-            import diffusers
-            diffusers_version = diffusers.__version__
-        except ImportError:
-            pass
-
         self.register_to_config(
             _class_name=self.__class__.__name__,
-            _diffusers_version=diffusers_version,
+            _diffusers_version="Unknown",
             vae=(vae.__module__, vae.__class__.__name__),
             text_encoder=(text_encoder.__module__, text_encoder.__class__.__name__),
             tokenizer=(tokenizer.__module__, tokenizer.__class__.__name__),
@@ -156,12 +146,12 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             refiner_unet=(refiner_unet.__module__, refiner_unet.__class__.__name__) if refiner_unet else None,
         )
 
-        # Store non-module configuration parameters separately
         self.pipeline_config = {
             "image_size": 1024,
             "t5_hidden_size": 768,
             "unet_cross_attn_dim": 2048,
-            "pooled_embed_dim": 1280,
+            "base_pooled_embed_dim": 1280,
+            "refiner_pooled_embed_dim": 2560
         }
 
         self.register_modules(
@@ -180,7 +170,8 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
 
         t5_hidden_size = self.pipeline_config.get("t5_hidden_size", 768)
         unet_cross_attn_dim = self.pipeline_config.get("unet_cross_attn_dim", 2048)
-        pooled_embed_dim = self.pipeline_config.get("pooled_embed_dim", 1280)
+        base_pooled_embed_dim = self.pipeline_config.get("base_pooled_embed_dim", 1280)
+        refiner_pooled_embed_dim = self.pipeline_config.get("refiner_pooled_embed_dim", 2560)
 
         if projection_layer is None:
             self.logger.info(f"Initializing Projection Layer T5({t5_hidden_size}) -> SDXL UNet({unet_cross_attn_dim})")
@@ -191,12 +182,26 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             self.projection_layer = projection_layer
 
         if pool_projection_layer is None:
-            self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL AddEmbs({pooled_embed_dim})")
-            self.pool_projection_layer = torch.nn.Linear(t5_hidden_size, pooled_embed_dim)
+            self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL Base AddEmbs({base_pooled_embed_dim})")
+            self.pool_projection_layer = torch.nn.Linear(t5_hidden_size, base_pooled_embed_dim)
             torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.01)
             torch.nn.init.zeros_(self.pool_projection_layer.bias)
         else:
             self.pool_projection_layer = pool_projection_layer
+
+        if refiner_unet is not None:
+            if refiner_pool_projection_layer is None:
+                self.logger.info(f"Initializing Refiner Pool Projection Layer T5({t5_hidden_size}) -> SDXL Refiner AddEmbs({refiner_pooled_embed_dim})")
+                self.refiner_pool_projection_layer = torch.nn.Linear(t5_hidden_size, refiner_pooled_embed_dim)
+                torch.nn.init.normal_(self.refiner_pool_projection_layer.weight, mean=0.0, std=0.01)
+                torch.nn.init.zeros_(self.refiner_pool_projection_layer.bias)
+            else:
+                self.refiner_pool_projection_layer = refiner_pool_projection_layer
+            # Validate refiner_pool_projection_layer dimensions
+            if self.refiner_pool_projection_layer.out_features != refiner_pooled_embed_dim:
+                raise ValueError(f"refiner_pool_projection_layer output dimension {self.refiner_pool_projection_layer.out_features} does not match expected {refiner_pooled_embed_dim}")
+        else:
+            self.refiner_pool_projection_layer = None
 
         if hasattr(self.vae, 'config') and hasattr(self.vae.config, 'block_out_channels'):
             self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -204,7 +209,38 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             self.vae_scale_factor = 8
             self.logger.warning(f"Could not determine vae_scale_factor, using default: {self.vae_scale_factor}")
 
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+        """
+        Prepares latent representations for the diffusion process.
+        """
+        shape = (
+            batch_size,
+            num_channels_latents,
+            height // self.vae_scale_factor,
+            width // self.vae_scale_factor,
+        )
+
+        if latents is None:
+            latents = torch.randn(
+                shape,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            if latents.shape != shape:
+                raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
+            latents = latents.to(device=device, dtype=dtype)
+
+        latents = latents * self.scheduler.init_noise_sigma
+        latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.logger.debug(f"Prepared latents with shape: {latents.shape}, device: {latents.device}, dtype: {latents.dtype}")
+        return latents
+
     def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=None):
+        """
+        Encodes the prompt using T5 and projects it to UNet-compatible embeddings for both base and refiner UNets.
+        """
         batch_size = len(prompt) if isinstance(prompt, list) else 1
         if isinstance(prompt, str): prompt = [prompt]
 
@@ -234,8 +270,20 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         pooled_output_t5 = encoder_hidden_states_t5.mean(dim=1)
         if not hasattr(self, 'pool_projection_layer') or self.pool_projection_layer is None:
             raise AttributeError("pool_projection_layer is required.")
-        text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
-        text_embeds = torch.nan_to_num(text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        base_text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
+        base_text_embeds = torch.nan_to_num(base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.logger.debug(f"Base text_embeds shape: {base_text_embeds.shape}")
+
+        refiner_text_embeds = None
+        if self.refiner_unet is not None and self.refiner_pool_projection_layer is not None:
+            refiner_text_embeds = self.refiner_pool_projection_layer(pooled_output_t5.to(dtype=self.refiner_pool_projection_layer.weight.dtype))
+            refiner_text_embeds = torch.nan_to_num(refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+            expected_refiner_dim = self.pipeline_config["refiner_pooled_embed_dim"]
+            if refiner_text_embeds.shape[-1] != expected_refiner_dim:
+                raise ValueError(f"refiner_text_embeds dimension {refiner_text_embeds.shape[-1]} does not match expected {expected_refiner_dim}")
+            self.logger.debug(f"Refiner text_embeds shape: {refiner_text_embeds.shape}")
+        else:
+            self.logger.debug("No refiner UNet or refiner_pool_projection_layer; using base text_embeds only.")
 
         image_size = self.pipeline_config.get("image_size", 1024)
         original_size = (image_size, image_size)
@@ -265,94 +313,34 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             uncond_prompt_embeds = torch.nan_to_num(uncond_prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
 
             uncond_pooled_output_t5 = uncond_encoder_hidden_states_t5.mean(dim=1)
-            uncond_text_embeds = self.pool_projection_layer(uncond_pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
-            uncond_text_embeds = torch.nan_to_num(uncond_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+            uncond_base_text_embeds = self.pool_projection_layer(uncond_pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
+            uncond_base_text_embeds = torch.nan_to_num(uncond_base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            uncond_refiner_text_embeds = None
+            if self.refiner_unet is not None and self.refiner_pool_projection_layer is not None:
+                uncond_refiner_text_embeds = self.refiner_pool_projection_layer(uncond_pooled_output_t5.to(dtype=self.refiner_pool_projection_layer.weight.dtype))
+                uncond_refiner_text_embeds = torch.nan_to_num(uncond_refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+                if uncond_refiner_text_embeds.shape[-1] != expected_refiner_dim:
+                    raise ValueError(f"uncond_refiner_text_embeds dimension {uncond_refiner_text_embeds.shape[-1]} does not match expected {expected_refiner_dim}")
 
             prompt_embeds = torch.cat([uncond_prompt_embeds, prompt_embeds])
-            text_embeds = torch.cat([uncond_text_embeds, text_embeds])
+            base_text_embeds = torch.cat([uncond_base_text_embeds, base_text_embeds])
+            if uncond_refiner_text_embeds is not None:
+                refiner_text_embeds = torch.cat([uncond_refiner_text_embeds, refiner_text_embeds])
             add_time_ids = torch.cat([add_time_ids, add_time_ids])
 
-        added_cond_kwargs = {"text_embeds": text_embeds, "time_ids": add_time_ids}
+        added_cond_kwargs = {
+            "text_embeds": base_text_embeds,
+            "time_ids": add_time_ids,
+            "refiner_text_embeds": refiner_text_embeds if refiner_text_embeds is not None else base_text_embeds
+        }
+        self.logger.debug(f"Prompt embeds shape: {prompt_embeds.shape}, Base text_embeds shape: {base_text_embeds.shape}, Refiner text_embeds shape: {refiner_text_embeds.shape if refiner_text_embeds is not None else 'None'}")
         return prompt_embeds, added_cond_kwargs
-    
-    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
-        """
-        Prepares latent representations for the diffusion process.
-
-        Args:
-            batch_size (int): Number of images to generate.
-            num_channels_latents (int): Number of channels in the latent space (e.g., 4 for SDXL UNet).
-            height (int): Height of the output image.
-            width (int): Width of the output image.
-            dtype (torch.dtype): Data type for the latents (e.g., torch.float16).
-            device (torch.device): Device to place the latents on (e.g., cuda).
-            generator (torch.Generator, optional): Random number generator for reproducibility.
-            latents (torch.Tensor, optional): Pre-initialized latents, if any.
-
-        Returns:
-            torch.Tensor: Initialized latent tensor of shape (batch_size, num_channels_latents, height // vae_scale_factor, width // vae_scale_factor).
-        """
-        shape = (
-            batch_size,
-            num_channels_latents,
-            height // self.vae_scale_factor,
-            width // self.vae_scale_factor,
-        )
-
-        if latents is None:
-            latents = torch.randn(
-                shape,
-                generator=generator,
-                device=device,
-                dtype=dtype,
-            )
-        else:
-            if latents.shape != shape:
-                raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
-            latents = latents.to(device=device, dtype=dtype)
-
-        # Scale initial noise according to scheduler
-        latents = latents * self.scheduler.init_noise_sigma
-        latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
-        return latents
 
     @torch.no_grad()
-    def __call__(
-        self,
-        prompt,
-        negative_prompt=None,
-        num_inference_steps=50,
-        guidance_scale=7.5,
-        num_images_per_prompt=1,
-        generator=None,
-        output_type="pil",
-        refiner_steps=10,
-        height=None,
-        width=None,
-        latents=None,
-        return_dict=True,
-        **kwargs
-    ):
+    def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, num_images_per_prompt=1, generator=None, output_type="pil", refiner_steps=10, height=None, width=None, latents=None, return_dict=True, **kwargs):
         """
-        Generates images from a prompt using the diffusion process.
-
-        Args:
-            prompt (str or list): Text prompt(s) for generation.
-            negative_prompt (str or list, optional): Negative prompt(s) for classifier-free guidance.
-            num_inference_steps (int): Number of denoising steps.
-            guidance_scale (float): Guidance scale for classifier-free guidance.
-            num_images_per_prompt (int): Number of images to generate per prompt.
-            generator (torch.Generator, optional): Random number generator for reproducibility.
-            output_type (str): Output format ('pil', 'latent', or 'np').
-            refiner_steps (int): Number of refiner steps (if refiner_unet is provided).
-            height (int, optional): Output image height.
-            width (int, optional): Output image width.
-            latents (torch.Tensor, optional): Pre-initialized latents.
-            return_dict (bool): Whether to return a BaseOutput object.
-            **kwargs: Additional arguments (ignored).
-
-        Returns:
-            BaseOutput or tuple: Generated images in the specified format.
+        Generates images using base and optional refiner UNets.
         """
         device = self.device
         dtype = self.unet.dtype if hasattr(self.unet, 'dtype') else torch.float32
@@ -363,7 +351,6 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         batch_size = len(prompt) if isinstance(prompt, list) else 1
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        # Encode prompt
         prompt_embeds, added_cond_kwargs = self._encode_prompt(
             prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=negative_prompt
         )
@@ -372,11 +359,9 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             if isinstance(v, torch.Tensor):
                 added_cond_kwargs[k] = v.to(dtype)
 
-        # Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # Prepare latents
         num_channels_latents = self.unet.config.in_channels
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
@@ -389,7 +374,6 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             latents,
         )
 
-        # Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -400,7 +384,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                     sample=latent_model_input,
                     timestep=t,
                     encoder_hidden_states=prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs
+                    added_cond_kwargs={"text_embeds": added_cond_kwargs["text_embeds"], "time_ids": added_cond_kwargs["time_ids"]}
                 ).sample
 
                 if do_classifier_free_guidance:
@@ -412,7 +396,6 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
-        # Optional refiner UNet step
         if self.refiner_unet is not None and refiner_steps > 0:
             self.logger.info("Running refiner UNet for additional denoising steps.")
             self.scheduler.set_timesteps(refiner_steps, device=device)
@@ -426,7 +409,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                         sample=latent_model_input,
                         timestep=t,
                         encoder_hidden_states=prompt_embeds,
-                        added_cond_kwargs=added_cond_kwargs
+                        added_cond_kwargs={"text_embeds": added_cond_kwargs["refiner_text_embeds"], "time_ids": added_cond_kwargs["time_ids"]}
                     ).sample
 
                     if do_classifier_free_guidance:
@@ -438,7 +421,6 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                     if i == len(refiner_timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                         progress_bar.update()
 
-        # Decode latents to images
         image = latents
         if output_type != "latent":
             self.vae.to(dtype=torch.float32)
@@ -540,17 +522,15 @@ class FinetuneModel:
             self.vae.eval()
             self.pipeline.to(self.device, dtype=self.dtype)
 
-            # Manually move non-registered Linear layers
             if hasattr(self.pipeline, 'projection_layer') and self.pipeline.projection_layer is not None:
-                self.pipeline.projection_layer.to(self.device)
-                for param in self.pipeline.projection_layer.parameters():
-                    param.data = param.data.to(dtype=self.dtype)
-                self.logger.info("Manually moved projection_layer to device and dtype.")
+                self.pipeline.projection_layer.to(self.device, dtype=self.dtype)
+                self.logger.info("Moved projection_layer to device and dtype.")
             if hasattr(self.pipeline, 'pool_projection_layer') and self.pipeline.pool_projection_layer is not None:
-                self.pipeline.pool_projection_layer.to(self.device)
-                for param in self.pipeline.pool_projection_layer.parameters():
-                    param.data = param.data.to(dtype=self.dtype)
-                self.logger.info("Manually moved pool_projection_layer to device and dtype.")
+                self.pipeline.pool_projection_layer.to(self.device, dtype=self.dtype)
+                self.logger.info("Moved pool_projection_layer to device and dtype.")
+            if hasattr(self.pipeline, 'refiner_pool_projection_layer') and self.pipeline.refiner_pool_projection_layer is not None:
+                self.pipeline.refiner_pool_projection_layer.to(self.device, dtype=self.dtype)
+                self.logger.info("Moved refiner_pool_projection_layer to device and dtype.")
 
             self.unet = self.pipeline.unet
             self.text_encoder = self.pipeline.text_encoder
@@ -599,6 +579,10 @@ class FinetuneModel:
             if hasattr(self.pipeline, 'pool_projection_layer'):
                 self.logger.info("Setting pool projection layer requires_grad=True")
                 for param in self.pipeline.pool_projection_layer.parameters():
+                    param.requires_grad = True
+            if hasattr(self.pipeline, 'refiner_pool_projection_layer'):
+                self.logger.info("Setting refiner pool projection layer requires_grad=True")
+                for param in self.pipeline.refiner_pool_projection_layer.parameters():
                     param.requires_grad = True
 
     def save_model_state(self, epoch=None, train_loss=None, hyperparameters=None, subdir=None):
@@ -655,6 +639,15 @@ class FinetuneModel:
             except Exception as e:
                 self.logger.error(f"Failed to save Pool Projection Layer: {e}")
 
+        if hasattr(self.pipeline, 'refiner_pool_projection_layer') and self._apply_lora_text_flag:
+            refiner_pool_proj_layer_path = os.path.join(output_subdir, f"{save_label}_refiner_pool_projection_layer.pth")
+            try:
+                torch.save(self.accelerator.get_state_dict(self.pipeline.refiner_pool_projection_layer), refiner_pool_proj_layer_path)
+                save_paths["Refiner_Pool_Projection_Layer"] = refiner_pool_proj_layer_path
+                self.logger.info(f"Saved Refiner Pool Projection Layer to {refiner_pool_proj_layer_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to save Refiner Pool Projection Layer: {e}")
+
         if hyperparameters:
             try:
                 hyperparameters.update({
@@ -685,11 +678,11 @@ class FinetuneModel:
             train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
             image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
 
-            # Prepare trainable components and optimizer
             params_to_optimize = []
             trainable_components = []
             projection_layer_added = False
             pool_projection_layer_added = False
+            refiner_pool_projection_layer_added = False
 
             if self._apply_lora_unet_flag:
                 params_to_optimize.extend(p for p in self.unet.parameters() if p.requires_grad)
@@ -698,7 +691,6 @@ class FinetuneModel:
 
             if self._apply_lora_refiner_flag and self.refiner_unet is not None:
                 params_to_optimize.extend(p for p in self.refiner_unet.parameters() if p.requires_grad)
-                trainable_components.append(self.refiner_unet)
                 self.logger.info("Adding Refiner UNet LoRA parameters.")
 
             if self._apply_lora_text_flag:
@@ -723,12 +715,24 @@ class FinetuneModel:
                         trainable_components.append(self.pipeline.pool_projection_layer)
                         pool_projection_layer_added = True
                         self.logger.info("Adding Pool Projection Layer parameters.")
+                if hasattr(self.pipeline, 'refiner_pool_projection_layer'):
+                    self.logger.info("Setting refiner pool projection layer requires_grad=True.")
+                    for param in self.pipeline.refiner_pool_projection_layer.parameters():
+                        param.requires_grad = True
+                    if not refiner_pool_projection_layer_added:
+                        params_to_optimize.extend(p for p in self.pipeline.refiner_pool_projection_layer.parameters() if p.requires_grad)
+                        trainable_components.append(self.pipeline.refiner_pool_projection_layer)
+                        refiner_pool_projection_layer_added = True
+                        self.logger.info("Adding Refiner Pool Projection Layer parameters.")
             elif not self._apply_lora_text_flag:
                 if hasattr(self.pipeline, 'projection_layer'):
                     for param in self.pipeline.projection_layer.parameters():
                         param.requires_grad = False
                 if hasattr(self.pipeline, 'pool_projection_layer'):
                     for param in self.pipeline.pool_projection_layer.parameters():
+                        param.requires_grad = False
+                if hasattr(self.pipeline, 'refiner_pool_projection_layer'):
+                    for param in self.pipeline.refiner_pool_projection_layer.parameters():
                         param.requires_grad = False
 
             params_to_optimize = list({id(p): p for p in params_to_optimize}.values())
@@ -763,6 +767,8 @@ class FinetuneModel:
                     self.pipeline.projection_layer = prepared_component
                 elif original_component is self.pipeline.pool_projection_layer:
                     self.pipeline.pool_projection_layer = prepared_component
+                elif original_component is self.pipeline.refiner_pool_projection_layer:
+                    self.pipeline.refiner_pool_projection_layer = prepared_component
 
             final_train_loss = float('inf')
             final_epoch = -1
@@ -923,7 +929,6 @@ class FinetuneModel:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            # Save the final model after all epochs
             if self.accelerator.is_main_process:
                 save_dir = os.path.join(self.output_dir, f"final_model")
                 self.logger.info(f"Saving final model after training at Epoch {final_epoch} with Train Loss: {final_train_loss:.4f}")
@@ -937,7 +942,6 @@ class FinetuneModel:
             return float('inf'), None, None, -1
 
 def run_finetune(config_path, hyperparam_config_path):
-    # Initialize Accelerator early to ensure logging works
     accelerator = Accelerator(
         gradient_accumulation_steps=8,
         mixed_precision='fp16',
