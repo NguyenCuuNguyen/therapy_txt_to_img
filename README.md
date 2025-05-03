@@ -57,6 +57,10 @@ Run ```python scripts/generate_images_from_finetuned.py``` to
 Changes: + Summarize prompt instead of truncated by CLIP tokenizer
          + Add refiner
 
+SDXL:
+    cross validation: python scripts/cross_validation_sdxl_base_refiner.py 
+    train with best result: python scripts/train_sdxl_base_refiner.py
+
 
 #how to run:
 cd generated_images
