@@ -66,9 +66,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         """Custom from_pretrained to handle projection_layer and logger."""
         projection_layer = kwargs.pop("projection_layer", None)
         logger = kwargs.pop("logger", None)
-        # Load the parent pipeline with all arguments
         pipeline = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-        # Create instance of custom class
         instance = cls(
             vae=pipeline.vae,
             text_encoder=pipeline.text_encoder,
@@ -88,7 +86,6 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         if isinstance(prompt, str):
             prompt = [prompt]
         
-        # Tokenize prompt
         text_inputs = self.tokenizer(
             prompt,
             padding="max_length",
@@ -99,21 +96,17 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         input_ids = text_inputs.input_ids
         attention_mask = text_inputs.attention_mask
 
-        # Encode with T5
         with torch.no_grad():
             text_encoder_output = self.text_encoder(input_ids, attention_mask=attention_mask)
-        last_hidden_state = text_encoder_output.last_hidden_state  # Shape: [batch_size, seq_len, 768]
+        last_hidden_state = text_encoder_output.last_hidden_state
 
-        # Apply projection layer
-        prompt_embeds = self.projection_layer(last_hidden_state)  # Shape: [batch_size, seq_len, 768]
+        prompt_embeds = self.projection_layer(last_hidden_state)
         self.logger.debug(f"Projected prompt embeds shape: {prompt_embeds.shape}")
 
-        # Pool embeddings (mean over sequence dimension, similar to CLIP text_embeds)
-        prompt_embeds = prompt_embeds.mean(dim=1)  # Shape: [batch_size, 768]
-        text_encoder_hidden_states = prompt_embeds  # For UNet cross-attention
+        prompt_embeds = prompt_embeds.mean(dim=1)
+        text_encoder_hidden_states = prompt_embeds
         text_mask = attention_mask
 
-        # Handle classifier-free guidance
         if do_classifier_free_guidance:
             negative_prompt = negative_prompt or [""] * batch_size
             if isinstance(negative_prompt, str):
@@ -131,15 +124,13 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
 
             with torch.no_grad():
                 negative_output = self.text_encoder(negative_input_ids, attention_mask=negative_attention_mask)
-            negative_embeds = self.projection_layer(negative_output.last_hidden_state)  # Shape: [batch_size, seq_len, 768]
-            negative_embeds = negative_embeds.mean(dim=1)  # Shape: [batch_size, 768]
+            negative_embeds = self.projection_layer(negative_output.last_hidden_state)
+            negative_embeds = negative_embeds.mean(dim=1)
 
-            # Concatenate for guidance
             prompt_embeds = torch.cat([negative_embeds, prompt_embeds], dim=0)
             text_encoder_hidden_states = torch.cat([negative_embeds, text_encoder_hidden_states], dim=0)
             text_mask = torch.cat([negative_attention_mask, attention_mask], dim=0)
 
-        # Repeat for multiple images per prompt
         prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
         text_encoder_hidden_states = text_encoder_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
         text_mask = text_mask.repeat_interleave(num_images_per_prompt, dim=0)
@@ -195,6 +186,39 @@ def load_sample_ids(txt_path):
         logger.error(f"Failed to load sample IDs from {txt_path}: {e}")
         return set()
 
+def select_best_checkpoint(checkpoint_base_dir):
+    """Selects the checkpoint directory with the lowest validation loss."""
+    checkpoint_dirs = [d for d in os.listdir(checkpoint_base_dir) if d.startswith("config_") and os.path.isdir(os.path.join(checkpoint_base_dir, d))]
+    if not checkpoint_dirs:
+        logger.error(f"No checkpoint directories found in {checkpoint_base_dir}")
+        return None
+
+    best_loss = float('inf')
+    best_checkpoint = None
+
+    for checkpoint_dir in checkpoint_dirs:
+        hyperparam_path = os.path.join(checkpoint_base_dir, checkpoint_dir, "best_hyperparameters.json")
+        if not os.path.exists(hyperparam_path):
+            logger.warning(f"No best_hyperparameters.json found in {checkpoint_dir}")
+            continue
+        try:
+            with open(hyperparam_path, 'r') as f:
+                hyperparams = json.load(f)
+            val_loss = float(hyperparams.get('validation_loss', 'inf'))
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_checkpoint = checkpoint_dir
+        except Exception as e:
+            logger.warning(f"Failed to read {hyperparam_path}: {e}")
+            continue
+
+    if best_checkpoint:
+        logger.info(f"Selected checkpoint with lowest validation loss ({best_loss:.4f}): {best_checkpoint}")
+        return best_checkpoint
+    else:
+        logger.error("No valid checkpoints found")
+        return None
+
 def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, device, target_dtype):
     """Loads the Kandinsky pipeline with fine-tuned T5 encoder, projection layer, and LoRA weights."""
     logger.info(f"Loading fine-tuned Kandinsky model from {lora_checkpoint_dir}...")
@@ -208,7 +232,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         prior_id = base_model_ids["kandinsky_prior"]
         decoder_id = base_model_ids["kandinsky_decoder"]
 
-        # Load T5-base text encoder
         logger.info("Loading T5-base text encoder (google/flan-t5-base)...")
         t5_model_name = "google/flan-t5-base"
         t5_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
@@ -217,18 +240,16 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
         logger.info(f"Loaded T5-base text encoder on {device} with dtype {t5_dtype}")
 
-        # Load projection layer
         projection_layer_path = os.path.join(lora_checkpoint_dir, "best_projection_layer.pth")
         if not os.path.exists(projection_layer_path):
             raise FileNotFoundError(f"Projection layer not found at {projection_layer_path}")
         t5_hidden_size = text_encoder.config.d_model
-        unet_cross_attn_dim = 768  # From Kandinsky UNet config
-        projection_layer = nn.Linear(t5_hidden_size, unet_cross_attn_dim).to(device, dtype=target_dtype)
+        prior_embed_dim = 1280  # From Kandinsky Prior config
+        projection_layer = nn.Linear(t5_hidden_size, prior_embed_dim).to(device, dtype=target_dtype)
         projection_layer.load_state_dict(torch.load(projection_layer_path, map_location=device))
         projection_layer.eval()
         logger.info(f"Loaded projection layer from {projection_layer_path}")
 
-        # Load Kandinsky prior pipeline with T5 encoder
         logger.info(f"Loading Kandinsky Prior Pipeline ({prior_id})...")
         prior_pipeline = KandinskyV22PriorPipelineWithT5.from_pretrained(
             prior_id,
@@ -240,7 +261,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         ).to(device)
         logger.info("Loaded Kandinsky prior pipeline with T5 encoder")
 
-        # Load Kandinsky decoder pipeline
         logger.info(f"Loading Kandinsky Decoder Pipeline ({decoder_id})...")
         pipeline = KandinskyV22Pipeline.from_pretrained(
             decoder_id,
@@ -248,13 +268,11 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
             use_safetensors=True
         )
 
-        # Load VAE in target_dtype
         logger.info(f"Loading Kandinsky VAE (MoVQ) in {target_dtype} from {decoder_id}/movq")
         vae = VQModel.from_pretrained(decoder_id, subfolder="movq", torch_dtype=target_dtype).to(device)
         pipeline.movq = vae
         logger.info(f"Loaded and assigned Kandinsky VQ VAE ({pipeline.movq.dtype})")
 
-        # Load LoRA weights for UNet using PeftModel
         logger.info(f"Loading UNet LoRA weights from {lora_checkpoint_dir}/best_unet_lora")
         unet_lora_path = os.path.join(lora_checkpoint_dir, "best_unet_lora")
         if not os.path.exists(unet_lora_path):
@@ -270,7 +288,6 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         pipeline.unet = unet
         logger.info("Loaded UNet LoRA weights using PeftModel")
 
-        # Move pipeline to device
         pipeline.to(device)
         logger.info(f"Finished loading fine-tuned Kandinsky pipeline")
         return pipeline, prior_pipeline
@@ -280,18 +297,18 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         return None, None
 
 def generate_images(
-    prior_pipeline,  # KandinskyV22PriorPipelineWithT5
-    decoder_pipeline,  # KandinskyV22Pipeline
-    refiner_pipeline,  # None for Kandinsky
-    model_name,  # str
-    prompts_df,  # pd.DataFrame
-    output_base_dir,  # str
-    checkpoint_label,  # str
-    gen_params_label,  # str
-    sample_ids,  # set
-    prompt_variations,  # dict
-    gen_hyperparams,  # dict
-    openai_utils  # OpenAIUtils
+    prior_pipeline,
+    decoder_pipeline,
+    refiner_pipeline,
+    model_name,
+    prompts_df,
+    output_base_dir,
+    checkpoint_label,
+    gen_params_label,
+    sample_ids,
+    prompt_variations,
+    gen_hyperparams,
+    openai_utils
 ):
     """Generates images using the fine-tuned Kandinsky model with GPT-4o-mini summarization."""
     if decoder_pipeline is None:
@@ -311,21 +328,18 @@ def generate_images(
         return
 
     logger.info(f"Generating images for {len(sample_ids)} IDs using {len(prompt_variations)} variations with params: {gen_params_label}")
-    img_size = 512  # Kandinsky uses 512x512
+    img_size = 512
     device = decoder_pipeline.device
 
-    # Extract generation hyperparameters
     k_prior_steps = gen_hyperparams.get("kandinsky_prior_steps", 25)
     k_decoder_steps = gen_hyperparams.get("kandinsky_decoder_steps", 50)
     k_guidance = gen_hyperparams.get("kandinsky_guidance", 4.0)
 
-    # Quality prompt additions
     pos_quality_boost = ", sharp focus, highly detailed, intricate details, clear, high resolution, masterpiece, 8k"
     neg_quality_boost = "blurry, blurred, smudged, low quality, worst quality, unclear, fuzzy, out of focus, text, words, letters, signature, watermark, username, artist name, deformed, distorted, disfigured, poorly drawn, bad anatomy, extra limbs, missing limbs"
 
-    # Tokenizer for length check (T5-base)
     tokenizer_for_check = prior_pipeline.tokenizer
-    t5_max_length = tokenizer_for_check.model_max_length  # 512 for T5-base
+    t5_max_length = tokenizer_for_check.model_max_length
 
     prompts_processed_count = 0
     all_columns = prompts_df.columns.tolist()
@@ -353,7 +367,7 @@ def generate_images(
 
         for variation_name, prompt_template in prompt_variations.items():
             logger.info(f"  Generating for variation: {variation_name}")
-            img_out_dir = "/home/iris/Documents/deep_learning/generated_images/iter2/best_t5_kandinsky"
+            img_out_dir = "/home/iris/Documents/deep_learning/generated_images/iter2/bigger_kandinsky_unet_prior"
             variation_output_dir = os.path.join(img_out_dir, checkpoint_label, gen_params_label, variation_name)
             os.makedirs(variation_output_dir, exist_ok=True)
 
@@ -368,7 +382,6 @@ def generate_images(
                 logger.error(f"  Error formatting prompt: {fmt_err}")
                 continue
 
-            # Check length and summarize with GPT-4o-mini if needed
             target_max_tokens = t5_max_length - 2
             token_ids = tokenizer_for_check(final_prompt_boosted, max_length=t5_max_length, truncation=False)["input_ids"]
 
@@ -388,7 +401,6 @@ def generate_images(
                     logger.info(f"  GPT-4o-mini summary: '{prompt_to_generate}...' ({token_count} tokens)")
                 except Exception as e:
                     logger.error(f"Failed to summarize prompt with GPT-4o-mini: {e}\n{traceback.format_exc()}")
-                    # Fallback: Truncate prompt manually
                     prompt_to_generate = tokenizer_for_check.decode(
                         token_ids[:target_max_tokens],
                         skip_special_tokens=True
@@ -441,13 +453,12 @@ def main():
     sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
     prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
     generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2"
-    lora_checkpoint_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky"
+    checkpoint_base_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky_unet_prior"
 
     config = load_config(config_path)
     if config is None:
         return
 
-    # Load OpenAI API key
     openai_config = config.get("openai", {})
     openai_api_key = openai_config.get("api_key")
     if not openai_api_key:
@@ -492,7 +503,6 @@ def main():
         "kandinsky_decoder": "kandinsky-community/kandinsky-2-2-decoder"
     }
 
-    # Define generation hyperparameter sets
     generation_param_sets = [
         {"kandinsky_prior_steps": 25, "kandinsky_decoder_steps": 50, "kandinsky_guidance": 4.0},
         {"kandinsky_prior_steps": 30, "kandinsky_decoder_steps": 60, "kandinsky_guidance": 4.0},
@@ -501,7 +511,15 @@ def main():
     ]
 
     model_name = "kandinsky"
-    logger.info(f"Processing fine-tuned Kandinsky model from {lora_checkpoint_dir}")
+    logger.info(f"Processing fine-tuned Kandinsky model from {checkpoint_base_dir}")
+
+    checkpoint_label = select_best_checkpoint(checkpoint_base_dir)
+    if not checkpoint_label:
+        logger.error("No valid checkpoint selected. Exiting.")
+        return
+
+    lora_checkpoint_dir = os.path.join(checkpoint_base_dir, checkpoint_label)
+    logger.info(f"Using checkpoint directory: {lora_checkpoint_dir}")
 
     for gen_idx, gen_params in enumerate(generation_param_sets):
         gen_params_label = f"gen_params_{gen_idx}"
@@ -520,11 +538,11 @@ def main():
                 generate_images(
                     prior_pipeline=prior_pipeline,
                     decoder_pipeline=pipeline,
-                    refiner_pipeline=None,  # No refiner for Kandinsky
+                    refiner_pipeline=None,
                     model_name=model_name,
                     prompts_df=prompts_df,
                     output_base_dir=generation_output_base,
-                    checkpoint_label="best_t5_kandinsky",
+                    checkpoint_label=checkpoint_label,
                     gen_params_label=gen_params_label,
                     sample_ids=sample_ids,
                     prompt_variations=prompt_variations,
