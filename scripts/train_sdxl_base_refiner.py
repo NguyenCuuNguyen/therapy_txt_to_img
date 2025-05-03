@@ -326,9 +326,9 @@ class FinetuneModel:
         self.best_val_loss = float('inf')
         self.best_epoch = -1
         self.current_epoch = 0
-        self._apply_lora_text_flag = False
         self._apply_lora_unet_flag = False
         self._apply_lora_refiner_flag = False
+        self._apply_lora_text_flag = False
         self.fold_val_losses = []
         self.optimizer = None
 
@@ -398,28 +398,28 @@ class FinetuneModel:
             self.logger.error(f"Failed to load model components: {e}\n{traceback.format_exc()}")
             raise
 
-    def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_refiner=True, apply_lora_to_text_encoder=False, lora_r=8, lora_alpha=16, lora_dropout=0.1):
-        self._apply_lora_unet_flag = apply_lora_to_unet
-        self._apply_lora_refiner_flag = apply_lora_to_refiner
-        self._apply_lora_text_flag = apply_lora_to_text_encoder
+    def modify_architecture(self, apply_lora_unet=True, apply_lora_refiner=True, apply_lora_text_encoder=False, lora_r=8, lora_alpha=16, lora_dropout=0.1):
+        self._apply_lora_unet_flag = apply_lora_unet
+        self._apply_lora_refiner_flag = apply_lora_refiner
+        self._apply_lora_text_flag = apply_lora_text_encoder
 
         lora_bias = "none"
         unet_target_modules = ["to_q", "to_k", "to_v", "to_out.0", "proj_in", "proj_out", "ff.net.0.proj", "ff.net.2"]
         lora_config_unet = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=lora_bias, target_modules=unet_target_modules)
 
-        if apply_lora_to_unet and self.unet:
+        if apply_lora_unet and self.unet:
             self.logger.info("Applying LoRA to base UNet...")
             self.unet = get_peft_model(self.unet, lora_config_unet)
             self.pipeline.unet = self.unet
             self.unet.print_trainable_parameters()
 
-        if apply_lora_to_refiner and self.refiner_unet:
+        if apply_lora_refiner and self.refiner_unet:
             self.logger.info("Applying LoRA to refiner UNet...")
             self.refiner_unet = get_peft_model(self.refiner_unet, lora_config_unet)
             self.pipeline.refiner_unet = self.refiner_unet
             self.refiner_unet.print_trainable_parameters()
 
-        if apply_lora_to_text_encoder and self.text_encoder:
+        if apply_lora_text_encoder and self.text_encoder:
             self.logger.info("Applying LoRA to T5 text encoder...")
             text_target_modules = ["q", "k", "v", "o"]
             lora_config_text = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=lora_bias, target_modules=text_target_modules)
@@ -483,10 +483,15 @@ class FinetuneModel:
                     for k,v in added_cond_kwargs.items(): added_cond_kwargs[k] = v.to(dtype=self.dtype)
 
                     pixel_values_norm = pixel_values * 2.0 - 1.0
+                    pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)  # Ensure valid input range
                     vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
                     latents = vae_output.latent_dist.sample() * self.pipeline.vae_scale_factor
+                    latents = torch.clamp(latents, -1e6, 1e6)  # Prevent extreme values
+                    latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
                     latents = latents.to(dtype=self.dtype)
-                    if torch.isnan(latents).any() or torch.isinf(latents).any(): continue
+                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                        self.logger.warning(f"Validation Step {step+1}: NaN/Inf in latents after clamping. Skipping.")
+                        continue
 
                     noise = torch.randn_like(latents)
                     timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
@@ -499,12 +504,16 @@ class FinetuneModel:
                         encoder_hidden_states=prompt_embeds,
                         added_cond_kwargs=added_cond_kwargs
                     ).sample
-                    if torch.isnan(model_pred).any() or torch.isinf(model_pred).any(): continue
+                    if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
+                        self.logger.warning(f"Validation Step {step+1}: NaN/Inf in base model_pred. Skipping.")
+                        continue
                     model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
                     base_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
                     val_loss = base_loss
 
-                    if torch.isnan(val_loss) or torch.isinf(val_loss): continue
+                    if torch.isnan(val_loss) or torch.isinf(val_loss):
+                        self.logger.warning(f"Validation Step {step+1}: Calculated loss is NaN/Inf. Skipping.")
+                        continue
 
                     gathered_loss = self.accelerator.gather(val_loss.repeat(latents.shape[0]))
                     total_val_loss += gathered_loss.mean().item() * latents.shape[0]
@@ -742,12 +751,16 @@ class FinetuneModel:
                                 for k,v in added_cond_kwargs.items(): added_cond_kwargs[k] = v.to(dtype=self.dtype)
 
                                 pixel_values_norm = pixel_values * 2.0 - 1.0
+                                pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)  # Ensure valid input range
                                 with torch.no_grad():
                                     vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
-                                    latents = vae_output.latent_dist.sample() * self.pipeline.vae_scale_factor
+                                    latents = vae_output.latent_dist.sample()
+                                    latents = latents * self.pipeline.vae_scale_factor
+                                    latents = torch.clamp(latents, -1e6, 1e6)  # Prevent extreme values
+                                    latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
                                     latents = latents.to(dtype=self.dtype)
                                 if torch.isnan(latents).any() or torch.isinf(latents).any():
-                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents. Skipping.")
+                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after clamping. Skipping.")
                                     self.optimizer.zero_grad()
                                     continue
 
@@ -934,7 +947,7 @@ def run_finetune(config_path):
             logger.error(f"Failed to create K-Fold splits: {e}\n{traceback.format_exc()}")
             return
 
-    base_output_dir = config.get("base_output_dir", "/home/iris/Documents/deep_learning/experiments/sdxl_t5_refiner")
+    base_output_dir = config.get("base_output_dir_sdxl", "/home/iris/Documents/deep_learning/experiments/sdxl_t5_refiner")
     if accelerator.is_main_process:
         os.makedirs(base_output_dir, exist_ok=True)
         logger.info(f"Base output directory: {base_output_dir}")
@@ -978,9 +991,9 @@ def run_finetune(config_path):
             finetuner.load_model()
             logger.info("Modifying architecture (applying LoRA if configured)...")
             finetuner.modify_architecture(
-                apply_lora_to_unet=hyperparams['apply_lora_unet'],
-                apply_lora_to_refiner=hyperparams['apply_lora_refiner'],
-                apply_lora_to_text_encoder=hyperparams['apply_lora_text_encoder'],
+                apply_lora_unet=hyperparams['apply_lora_unet'],
+                apply_lora_refiner=hyperparams['apply_lora_refiner'],
+                apply_lora_text_encoder=hyperparams['apply_lora_text_encoder'],
                 lora_r=hyperparams['lora_r'],
                 lora_alpha=hyperparams['lora_alpha'],
                 lora_dropout=hyperparams['lora_dropout']
