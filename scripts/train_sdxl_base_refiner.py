@@ -8,13 +8,17 @@ import json
 import math
 from accelerate import Accelerator
 from accelerate.logging import get_logger
+import torch.nn.functional as F
 from diffusers import (
-    StableDiffusionXLPipeline,
     AutoencoderKL,
     DPMSolverMultistepScheduler,
     UNet2DConditionModel,
+    DiffusionPipeline,
+    ConfigMixin,
 )
 from transformers import T5EncoderModel, T5Tokenizer
+from diffusers.utils import BaseOutput
+from diffusers.configuration_utils import FrozenDict
 from peft import LoraConfig, get_peft_model, PeftModel
 from torch.utils.data import DataLoader, Subset
 from PIL import Image
@@ -29,19 +33,28 @@ except ImportError:
 try:
     from src.utils.dataset import load_dataset, CocoFinetuneDataset
 except ImportError:
-    print("Warning: Could not import dataset utilities.")
-    class CocoFinetuneDataset(torch.utils.data.Dataset): pass
-    def load_dataset(path, splits): return []
+    print("Warning: Could not import dataset utilities. Using dummy dataset.")
+    class CocoFinetuneDataset(torch.utils.data.Dataset):
+        def __init__(self, data):
+            self.data = data
+        def __len__(self):
+            return len(self.data)
+        def __getitem__(self, idx):
+            return {"image": f"dummy_{idx}.jpg", "prompt": "a dummy prompt"}
+    def load_dataset(path, splits=None):
+        print(f"Warning: Using dummy load_dataset for path: {path}")
+        dummy_data = [{"id": i, "image": f"dummy_{i}.jpg", "prompt": f"dummy prompt {i}"} for i in range(200)]
+        return CocoFinetuneDataset(dummy_data)
 
 # --- Configuration ---
 LOG_FILE = '/home/iris/Documents/deep_learning/src/logs/train_sdxl_with_refiner.log'
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.DEBUG,
-    format='%(asctime)s %(message)s',
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
     filemode='w',
 )
-logger = get_logger(__name__)
+logger = get_logger(__name__, log_level="INFO")
 print(f"Logging to {LOG_FILE}")
 
 def load_config(config_path):
@@ -53,254 +66,238 @@ def load_config(config_path):
         print(f"Error: Configuration file not found: {config_path}")
         return None
     except Exception as e:
-        logger.error(f"Error loading configuration: {e}")
+        logger.error(f"Error loading configuration: {e}\n{traceback.format_exc()}")
         print(f"Error loading configuration: {e}")
         return None
 
-# --- Custom SDXL Pipeline with T5 ---
-# class StableDiffusionXLPipelineWithT5(StableDiffusionXLPipeline):
-#     def __init__(self, vae, text_encoder, tokenizer, unet, scheduler, logger_instance=None):
-#         super().__init__(
-#             vae=vae,
-#             text_encoder=text_encoder,
-#             tokenizer=tokenizer,
-#             unet=unet,
-#             scheduler=scheduler,
-#             text_encoder_2=None,
-#             tokenizer_2=None
-#         )
-#         self.logger = logger_instance or logging.getLogger(__name__)
-#         self.tokenizer.model_max_length = 512
-#         self.projection_layer = torch.nn.Linear(768, 1280).to(device=self.unet.device, dtype=self.unet.dtype)
-#         torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.01)
-#         torch.nn.init.zeros_(self.projection_layer.bias)
-#         self.refiner_unet = None  # Managed separately, not a pipeline component
-        # Explicitly register only the required components
-        # self.register_modules(
-        #     vae=vae,
-        #     text_encoder=text_encoder,
-        #     tokenizer=tokenizer,
-        #     unet=unet,
-        #     scheduler=scheduler,
-        #     text_encoder_2=None,
-        #     tokenizer_2=None
-        # )
+# --- Custom Pipeline ---
+class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
+    config_name = "pipeline_config.json"
+    _optional_components = ["refiner_unet"]
 
-class StableDiffusionXLPipelineWithT5(StableDiffusionXLPipeline):
-    def __init__(self, vae, text_encoder, tokenizer, unet, scheduler, logger_instance=None):
-        # Call super init, explicitly setting unused SDXL components to None
-        super().__init__(
+    def __init__(self,
+                 vae: AutoencoderKL,
+                 text_encoder: T5EncoderModel,
+                 tokenizer: T5Tokenizer,
+                 unet: UNet2DConditionModel,
+                 scheduler: DPMSolverMultistepScheduler,
+                 projection_layer: torch.nn.Module = None,
+                 pool_projection_layer: torch.nn.Module = None,
+                 refiner_unet: UNet2DConditionModel = None,
+                 logger_instance = None):
+        super().__init__()
+        self.logger = logger_instance or get_logger(__name__)
+
+        # Initialize configuration for modules only
+        try:
+            diffusers_version = "Unknown"
+            import diffusers
+            diffusers_version = diffusers.__version__
+        except ImportError:
+            pass
+
+        self.register_to_config(
+            _class_name=self.__class__.__name__,
+            _diffusers_version=diffusers_version,
+            vae=(vae.__module__, vae.__class__.__name__),
+            text_encoder=(text_encoder.__module__, text_encoder.__class__.__name__),
+            tokenizer=(tokenizer.__module__, tokenizer.__class__.__name__),
+            unet=(unet.__module__, unet.__class__.__name__),
+            scheduler=(scheduler.__module__, scheduler.__class__.__name__),
+            refiner_unet=(refiner_unet.__module__, refiner_unet.__class__.__name__) if refiner_unet else None,
+        )
+
+        # Store non-module configuration parameters separately
+        self.pipeline_config = {
+            "image_size": 1024,
+            "t5_hidden_size": 768,
+            "unet_cross_attn_dim": 2048,
+            "pooled_embed_dim": 1280,
+        }
+
+        self.register_modules(
             vae=vae,
-            text_encoder=text_encoder, # T5 Encoder passed as primary
-            tokenizer=tokenizer,       # T5 Tokenizer passed as primary
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            text_encoder_2=None,       # Explicitly None
-            tokenizer_2=None,          # Explicitly None
-            image_encoder=None,        # Explicitly None
-            feature_extractor=None     # Explicitly None
-            # Note: force_zeros_for_empty_prompt is a config flag, not a component attribute here
+            refiner_unet=refiner_unet,
         )
-        self.logger = logger_instance or logging.getLogger(__name__)
-        self.tokenizer.model_max_length = 512
 
-        # Define and initialize projection layer *after* super().__init__
-        # so self.device and self.dtype are available
-        # self.projection_layer = torch.nn.Linear(768, 1280).to(device=self.device, dtype=self.dtype)
-        self.projection_layer = torch.nn.Linear(768, 1280) # Define on CPU first
-        torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.01)
-        torch.nn.init.zeros_(self.projection_layer.bias)
+        if hasattr(self.tokenizer, 'model_max_length'):
+            self.tokenizer.model_max_length = 512
+        else:
+            self.logger.warning("Tokenizer does not have 'model_max_length' attribute.")
 
-        self.refiner_unet = None  # Managed separately, not a pipeline component
+        t5_hidden_size = self.pipeline_config.get("t5_hidden_size", 768)
+        unet_cross_attn_dim = self.pipeline_config.get("unet_cross_attn_dim", 2048)
+        pooled_embed_dim = self.pipeline_config.get("pooled_embed_dim", 1280)
 
-        # --- Clean up unused components from internal registry ---
-        # These were added by the base SDXL __init__ but are None and not needed
-        components_to_remove = ['text_encoder_2', 'tokenizer_2', 'image_encoder', 'feature_extractor']
-        config_keys_to_remove = [] # Store config keys related to removed components
+        if projection_layer is None:
+            self.logger.info(f"Initializing Projection Layer T5({t5_hidden_size}) -> SDXL UNet({unet_cross_attn_dim})")
+            self.projection_layer = torch.nn.Linear(t5_hidden_size, unet_cross_attn_dim)
+            torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.01)
+            torch.nn.init.zeros_(self.projection_layer.bias)
+        else:
+            self.projection_layer = projection_layer
 
-        # 1. Clean up internal _components dictionary
-        if hasattr(self, '_components'):
-            self.logger.debug(f"Pipeline Init: Before cleanup _components keys: {list(self._components.keys())}")
-            for comp_name in components_to_remove:
-                if comp_name in self._components:
-                    del self._components[comp_name] # Remove from internal dict
-            self.logger.debug(f"Pipeline Init: After cleanup _components keys: {list(self._components.keys())}")
+        if pool_projection_layer is None:
+            self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL AddEmbs({pooled_embed_dim})")
+            self.pool_projection_layer = torch.nn.Linear(t5_hidden_size, pooled_embed_dim)
+            torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.01)
+            torch.nn.init.zeros_(self.pool_projection_layer.bias)
+        else:
+            self.pool_projection_layer = pool_projection_layer
 
-        # 2. Clean up attributes (if they exist and are None)
-        for comp_name in components_to_remove:
-            if hasattr(self, comp_name):
-                attr_value = getattr(self, comp_name, 'AttributeMissing')
-                if attr_value is None:
-                    try:
-                        delattr(self, comp_name)
-                        self.logger.debug(f"Deleted attribute {comp_name}")
-                    except AttributeError:
-                         self.logger.debug(f"Attribute {comp_name} not found or couldn't be deleted.")
-
-        # 3. Identify and remove corresponding keys from the pipeline's config *** CRITICAL STEP ***
-        if hasattr(self, 'config'):
-             self.logger.debug(f"Pipeline Init: Before cleanup config keys: {list(self.config.keys())}")
-             # Convert config to dict to safely iterate and modify
-             config_dict = self.config.to_dict()
-             keys_to_del_from_config = []
-
-             # Find all keys related to the components we want to remove
-             for key in config_dict.keys():
-                 # Check if the key itself is one of the components or contains its name
-                 # (e.g., 'text_encoder_2', or keys related to its config like '_text_encoder_2_name_or_path')
-                 if any(comp_name in key for comp_name in components_to_remove):
-                      keys_to_del_from_config.append(key)
-
-             # Delete the identified keys from the dictionary
-             for key in keys_to_del_from_config:
-                 if key in config_dict:
-                     del config_dict[key]
-                     self.logger.debug(f"Removed key '{key}' from config dict")
-
-             # Overwrite the pipeline's config with the cleaned dictionary
-             # We need to be careful about the config type. Let's update the existing object.
-             # Directly modifying self.config._internal_dict might be possible but risky.
-             # Updating via direct attribute access if config is like a dot-dict:
-             original_config_keys = list(self.config.keys())
-             for key in original_config_keys:
-                 if key not in config_dict and hasattr(self.config, key):
-                    try:
-                        delattr(self.config, key)
-                        self.logger.debug(f"Deleted attribute {key} from config object")
-                    except Exception as e:
-                        self.logger.warning(f"Could not delete attribute {key} from config object: {e}")
-                 elif key in config_dict and hasattr(self.config, key):
-                     # Ensure existing keys are updated if necessary (though unlikely here)
-                     # setattr(self.config, key, config_dict[key])
-                     pass # Usually deletion is sufficient
-
-
-             self.logger.debug(f"Pipeline Init: After cleanup config keys: {list(self.config.keys())}")
-             # Final check - ensure expected keys are still there
-             expected_keys = {'vae', 'tokenizer', 'text_encoder', 'scheduler', 'unet'}
-             missing_keys = expected_keys - set(self.config.keys())
-             if missing_keys:
-                 self.logger.warning(f"Config cleanup might have removed expected keys: {missing_keys}")
-
-
-    def to(self, *args, **kwargs):
-        """ Override to ensure projection layer is also moved """
-        # Call the original to method first to move registered components
-        super_return = super().to(*args, **kwargs)
-
-        # Move the custom projection layer
-        if hasattr(self, 'projection_layer') and isinstance(self.projection_layer, torch.nn.Module):
-            try:
-                self.projection_layer.to(*args, **kwargs)
-                self.logger.debug(f"Moved projection_layer to device/dtype specified in .to()")
-            except Exception as e:
-                self.logger.error(f"Failed to move projection_layer in overridden .to(): {e}")
-
-        # Also ensure refiner_unet is moved if it exists (set_refiner_unet might not catch subsequent .to calls)
-        if hasattr(self, 'refiner_unet') and self.refiner_unet is not None:
-             try:
-                 self.refiner_unet.to(*args, **kwargs)
-                 self.logger.debug(f"Moved refiner_unet in overridden .to()")
-             except Exception as e:
-                 self.logger.error(f"Failed to move refiner_unet in overridden .to(): {e}")
-
-        return super_return
-
-    def set_refiner_unet(self, refiner_unet):
-        """Set the refiner UNet and move it to the correct device/dtype."""
-        self.refiner_unet = refiner_unet
-        if refiner_unet:
-            # Move refiner based on the *current* device/dtype of the main unet
-            try:
-                 target_device = self.unet.device
-                 target_dtype = self.unet.dtype
-                 self.refiner_unet.to(device=target_device, dtype=target_dtype)
-                 self.logger.info(f"Set and moved refiner UNet to device {target_device}, dtype {target_dtype}")
-            except Exception as e:
-                 self.logger.error(f"Failed to move refiner UNet in set_refiner_unet: {e}")
-
+        if hasattr(self.vae, 'config') and hasattr(self.vae.config, 'block_out_channels'):
+            self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        else:
+            self.vae_scale_factor = 8
+            self.logger.warning(f"Could not determine vae_scale_factor, using default: {self.vae_scale_factor}")
 
     def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=None):
         batch_size = len(prompt) if isinstance(prompt, list) else 1
         if isinstance(prompt, str): prompt = [prompt]
-        if not all(isinstance(p, str) and p.strip() for p in prompt):
-            self.logger.warning(f"Invalid prompts detected: {prompt}. Using default prompt.")
-            prompt = ["an abstract representation"] * batch_size
-        text_inputs = self.tokenizer(
-            prompt, padding="max_length", max_length=512, truncation=True, return_tensors="pt"
-        ).to(device)
-        input_ids = text_inputs.input_ids
-        attention_mask = text_inputs.attention_mask
-        self.logger.debug(f"Input IDs stats - min: {input_ids.min().item()}, max: {input_ids.max().item()}, mean: {input_ids.float().mean().item():.4f}")
-        with torch.no_grad():
-            encoder_hidden_states = self.text_encoder(input_ids, attention_mask=attention_mask).last_hidden_state
-            encoder_hidden_states = torch.nan_to_num(encoder_hidden_states, nan=0.0, posinf=1.0, neginf=-1.0)
-            self.logger.debug(f"T5 output stats - min: {encoder_hidden_states.min().item():.4f}, max: {encoder_hidden_states.max().item():.4f}, mean: {encoder_hidden_states.mean().item():.4f}")
-        prompt_embeds = encoder_hidden_states.mean(dim=1)
-        prompt_embeds = self.projection_layer(prompt_embeds)
-        prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
-        std = prompt_embeds.std(dim=1, keepdim=True)
-        if (std > 1e-6).all():
-            prompt_embeds = prompt_embeds / (std.clamp(min=1e-6) * 10.0)
-        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, 77, -1)
-        add_time_ids = torch.tensor([[self.vae.config.sample_size, self.vae.config.sample_size, 0, 0, self.vae.config.sample_size, self.vae.config.sample_size]], dtype=prompt_embeds.dtype).repeat(batch_size, 1).to(device)
-        if do_classifier_free_guidance:
-            negative_prompt = negative_prompt or [""] * batch_size
-            if isinstance(negative_prompt, str): negative_prompt = [negative_prompt]
-            negative_inputs = self.tokenizer(
-                negative_prompt, padding="max_length", max_length=512, truncation=True, return_tensors="pt"
-            ).to(device)
-            negative_hidden_states = self.text_encoder(negative_inputs.input_ids, attention_mask=negative_inputs.attention_mask).last_hidden_state
-            negative_hidden_states = torch.nan_to_num(negative_hidden_states, nan=0.0, posinf=1.0, neginf=-1.0)
-            negative_embeds = negative_hidden_states.mean(dim=1)
-            negative_embeds = self.projection_layer(negative_embeds)
-            negative_embeds = torch.nan_to_num(negative_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
-            std_neg = negative_embeds.std(dim=1, keepdim=True)
-            if (std_neg > 1e-6).all():
-                negative_embeds = negative_embeds / (std_neg.clamp(min=1e-6) * 10.0)
-            negative_embeds = negative_embeds.unsqueeze(1).expand(-1, 77, -1)
-            prompt_embeds = torch.cat([negative_embeds, prompt_embeds], dim=0)
-            add_time_ids = add_time_ids.repeat(2, 1)
-        return prompt_embeds, {"text_embeds": torch.zeros(batch_size, 1280).to(device, prompt_embeds.dtype), "time_ids": add_time_ids}
 
-    def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, generator=None, output_type="pil", refiner_steps=10, **kwargs):
-        device = self.unet.device
-        dtype = self.unet.dtype
-        batch_size = len(prompt) if isinstance(prompt, list) else 1
-        do_classifier_free_guidance = guidance_scale > 1.0
-        prompt_embeds, added_cond_kwargs = self._encode_prompt(
-            prompt, device, 1, do_classifier_free_guidance, negative_prompt
+        tokenizer_max_length = getattr(self.tokenizer, 'model_max_length', 512)
+        text_inputs = self.tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=tokenizer_max_length,
+            truncation=True,
+            return_tensors="pt",
         )
+        text_input_ids = text_inputs.input_ids
+        attention_mask = text_inputs.attention_mask
+
+        with torch.no_grad():
+            encoder_hidden_states_t5 = self.text_encoder(
+                text_input_ids.to(device),
+                attention_mask=attention_mask.to(device)
+            )[0]
+        encoder_hidden_states_t5 = torch.nan_to_num(encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        if not hasattr(self, 'projection_layer') or self.projection_layer is None:
+            raise AttributeError("projection_layer is required.")
+        prompt_embeds = self.projection_layer(encoder_hidden_states_t5.to(dtype=self.projection_layer.weight.dtype))
+        prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        pooled_output_t5 = encoder_hidden_states_t5.mean(dim=1)
+        if not hasattr(self, 'pool_projection_layer') or self.pool_projection_layer is None:
+            raise AttributeError("pool_projection_layer is required.")
+        text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
+        text_embeds = torch.nan_to_num(text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        image_size = self.pipeline_config.get("image_size", 1024)
+        original_size = (image_size, image_size)
+        crops_coords_top_left = (0, 0)
+        target_size = (image_size, image_size)
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+        add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype, device=device)
+        add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+
+        if do_classifier_free_guidance:
+            negative_prompt = negative_prompt or ""
+            if isinstance(negative_prompt, str): negative_prompt = [negative_prompt] * batch_size
+
+            uncond_tokens = self.tokenizer(
+                negative_prompt, padding="max_length", max_length=tokenizer_max_length, truncation=True, return_tensors="pt",
+            )
+            uncond_input_ids = uncond_tokens.input_ids
+            uncond_attention_mask = uncond_tokens.attention_mask
+
+            with torch.no_grad():
+                uncond_encoder_hidden_states_t5 = self.text_encoder(
+                    uncond_input_ids.to(device), attention_mask=uncond_attention_mask.to(device)
+                )[0]
+            uncond_encoder_hidden_states_t5 = torch.nan_to_num(uncond_encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            uncond_prompt_embeds = self.projection_layer(uncond_encoder_hidden_states_t5.to(dtype=self.projection_layer.weight.dtype))
+            uncond_prompt_embeds = torch.nan_to_num(uncond_prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            uncond_pooled_output_t5 = uncond_encoder_hidden_states_t5.mean(dim=1)
+            uncond_text_embeds = self.pool_projection_layer(uncond_pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
+            uncond_text_embeds = torch.nan_to_num(uncond_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            prompt_embeds = torch.cat([uncond_prompt_embeds, prompt_embeds])
+            text_embeds = torch.cat([uncond_text_embeds, text_embeds])
+            add_time_ids = torch.cat([add_time_ids, add_time_ids])
+
+        added_cond_kwargs = {"text_embeds": text_embeds, "time_ids": add_time_ids}
+        return prompt_embeds, added_cond_kwargs
+
+    @torch.no_grad()
+    def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, generator=None, output_type="pil", refiner_steps=10,
+                 height=None, width=None, latents=None, return_dict=True, **kwargs):
+        device = self.device
+        dtype = torch.float32
+        if hasattr(self.unet, 'dtype'):
+            dtype = self.unet.dtype
+
+        height = height or self.pipeline_config.get("image_size", 1024)
+        width = width or self.pipeline_config.get("image_size", 1024)
+
+        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        prompt_embeds, added_cond_kwargs = self._encode_prompt(
+            prompt, device, 1, do_classifier_free_guidance, negative_prompt=negative_prompt
+        )
+        prompt_embeds = prompt_embeds.to(dtype)
+        for k, v in added_cond_kwargs.items():
+            if isinstance(v, torch.Tensor):
+                added_cond_kwargs[k] = v.to(dtype)
+
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        latents = torch.randn((batch_size, self.unet.in_channels, 1024 // 8, 1024 // 8), device=device, dtype=dtype, generator=generator)
-        for t in self.scheduler.timesteps:
-            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-            noise_pred = self.unet(
-                latent_model_input,
-                t,
-                encoder_hidden_states=prompt_embeds,
-                added_cond_kwargs=added_cond_kwargs
-            ).sample
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-            latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-        if self.refiner_unet:
-            for _ in range(refiner_steps):
-                noise_pred = self.refiner_unet(
-                    latents,
-                    t,
-                    encoder_hidden_states=prompt_embeds[:batch_size],
+        timesteps = self.scheduler.timesteps
+
+        num_channels_latents = self.unet.config.in_channels
+        latents = self.prepare_latents(
+            batch_size, num_channels_latents, height, width, dtype, device, generator, latents,
+        )
+
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                noise_pred = self.unet(
+                    sample=latent_model_input,
+                    timestep=t,
+                    encoder_hidden_states=prompt_embeds,
                     added_cond_kwargs=added_cond_kwargs
                 ).sample
+
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-        latents = latents / self.vae.config.scaling_factor
-        images = self.vae.decode(latents.to(dtype=torch.float32)).sample
-        images = (images / 2 + 0.5).clamp(0, 1)
-        images = images.permute(0, 2, 3, 1).float().cpu().numpy()
+
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+
+        if self.refiner_unet is not None and refiner_steps > 0:
+            self.logger.warning("Refiner UNet step skipped: Requires separate encoding/projection logic not implemented here.")
+
+        image = latents
+        if not output_type == "latent":
+            self.vae.to(dtype=torch.float32)
+            latents = latents.to(dtype=torch.float32)
+            latents = latents / self.vae_scale_factor
+            self.vae.to(device=latents.device)
+            image = self.vae.decode(latents).sample
+            image = (image / 2 + 0.5).clamp(0, 1)
+            image = image.cpu().permute(0, 2, 3, 1).numpy()
+
         if output_type == "pil":
-            images = [Image.fromarray((img * 255).astype(np.uint8)) for img in images]
-        return images
+            image = self.numpy_to_pil(image)
+
+        if not return_dict:
+            return (image,)
+
+        return BaseOutput(images=image)
 
 # --- FinetuneModel Class ---
 class FinetuneModel:
@@ -308,9 +305,16 @@ class FinetuneModel:
         self.model_name = model_name
         self.output_dir = output_dir
         self.accelerator = accelerator
-        self.logger = logger_instance or logging.getLogger(__name__)
+        self.logger = logger_instance or get_logger(__name__)
         self.device = accelerator.device
-        self.dtype = torch.float16
+        if accelerator.mixed_precision == 'fp16':
+            self.dtype = torch.float16
+        elif accelerator.mixed_precision == 'bf16':
+            self.dtype = torch.bfloat16
+        else:
+            self.dtype = torch.float32
+        self.logger.info(f"Using dtype: {self.dtype} based on accelerator state.")
+
         self.tokenizer = None
         self.text_encoder = None
         self.unet = None
@@ -326,6 +330,7 @@ class FinetuneModel:
         self._apply_lora_unet_flag = False
         self._apply_lora_refiner_flag = False
         self.fold_val_losses = []
+        self.optimizer = None
 
     def load_model(self):
         try:
@@ -333,244 +338,264 @@ class FinetuneModel:
             base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
             refiner_model_id = "stabilityai/stable-diffusion-xl-refiner-1.0"
 
-            # Load components individually (onto CPU first)
             self.tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
-            self.tokenizer.model_max_length = 512
-
-            # Load models onto CPU initially
             self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name)
             self.vae = AutoencoderKL.from_pretrained(base_model_id, subfolder="vae")
             self.unet = UNet2DConditionModel.from_pretrained(base_model_id, subfolder="unet")
             self.refiner_unet = UNet2DConditionModel.from_pretrained(refiner_model_id, subfolder="unet")
             self.scheduler = DPMSolverMultistepScheduler.from_pretrained(base_model_id, subfolder="scheduler")
 
-            # --- Enable gradient checkpointing ---
-            # Use the correct method/attribute for each model type
             self.logger.info("Attempting to enable gradient checkpointing...")
             try:
-                # For T5EncoderModel (transformers)
                 self.text_encoder.gradient_checkpointing = True
                 self.logger.info("Enabled gradient checkpointing for T5 Text Encoder.")
-            except AttributeError:
-                 self.logger.warning("Could not enable gradient checkpointing for T5 Text Encoder via attribute.")
-                 # Add alternative ways if needed, or just log the warning.
-
+            except AttributeError: self.logger.warning("Could not enable GC for T5.")
             try:
-                # For UNet2DConditionModel (diffusers)
                 self.unet.enable_gradient_checkpointing()
                 self.logger.info("Enabled gradient checkpointing for UNet.")
-            except AttributeError:
-                 self.logger.warning("Could not enable gradient checkpointing for UNet via method 'enable_gradient_checkpointing'.")
-
+            except AttributeError: self.logger.warning("Could not enable GC for UNet.")
             try:
-                 # For Refiner UNet (diffusers)
                 self.refiner_unet.enable_gradient_checkpointing()
                 self.logger.info("Enabled gradient checkpointing for Refiner UNet.")
-            except AttributeError:
-                 self.logger.warning("Could not enable gradient checkpointing for Refiner UNet via method 'enable_gradient_checkpointing'.")
+            except AttributeError: self.logger.warning("Could not enable GC for Refiner UNet.")
 
-
-            # Instantiate the custom pipeline (components still on CPU)
             self.pipeline = StableDiffusionXLPipelineWithT5(
                 vae=self.vae,
                 text_encoder=self.text_encoder,
                 tokenizer=self.tokenizer,
                 unet=self.unet,
                 scheduler=self.scheduler,
+                refiner_unet=self.refiner_unet,
                 logger_instance=self.logger
             )
-            # The pipeline __init__ defines projection_layer but doesn't move it
 
-            # Set the refiner UNet (also still on CPU, set_refiner_unet won't move it yet)
-            self.pipeline.set_refiner_unet(self.refiner_unet)
-
-            # --- Move models to target device and set dtype ---
             self.logger.info(f"Moving models to target device: {self.device} and dtype: {self.dtype}")
-
-            # Move VAE separately (often kept in fp32)
             self.vae.to(self.device, dtype=torch.float32)
-            self.vae.eval() # Set VAE to eval mode permanently
-
-            # Move the rest using the overridden pipeline.to() method
-            # This handles unet, text_encoder, scheduler, tokenizer (if applicable),
-            # projection_layer, and refiner_unet.
+            self.vae.eval()
             self.pipeline.to(self.device, dtype=self.dtype)
 
-            self.logger.info("Model components loaded, pipeline initialized, and models moved to device.")
+            # Manually move non-registered Linear layers
+            if hasattr(self.pipeline, 'projection_layer') and self.pipeline.projection_layer is not None:
+                self.pipeline.projection_layer.to(self.device)
+                for param in self.pipeline.projection_layer.parameters():
+                    param.data = param.data.to(dtype=self.dtype)
+                self.logger.info("Manually moved projection_layer to device and dtype.")
+            if hasattr(self.pipeline, 'pool_projection_layer') and self.pipeline.pool_projection_layer is not None:
+                self.pipeline.pool_projection_layer.to(self.device)
+                for param in self.pipeline.pool_projection_layer.parameters():
+                    param.data = param.data.to(dtype=self.dtype)
+                self.logger.info("Manually moved pool_projection_layer to device and dtype.")
 
+            self.unet = self.pipeline.unet
+            self.text_encoder = self.pipeline.text_encoder
+            self.vae = self.pipeline.vae
+            self.scheduler = self.pipeline.scheduler
+            self.tokenizer = self.pipeline.tokenizer
+            self.refiner_unet = self.pipeline.refiner_unet
+
+            self.logger.info("Model components loaded, pipeline initialized, and models moved to device.")
         except Exception as e:
             self.logger.error(f"Failed to load model components: {e}\n{traceback.format_exc()}")
             raise
-
 
     def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_refiner=True, apply_lora_to_text_encoder=False, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self._apply_lora_unet_flag = apply_lora_to_unet
         self._apply_lora_refiner_flag = apply_lora_to_refiner
         self._apply_lora_text_flag = apply_lora_to_text_encoder
+
         lora_bias = "none"
         unet_target_modules = ["to_q", "to_k", "to_v", "to_out.0", "proj_in", "proj_out", "ff.net.0.proj", "ff.net.2"]
-        lora_config = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=lora_bias, target_modules=unet_target_modules)
+        lora_config_unet = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=lora_bias, target_modules=unet_target_modules)
+
         if apply_lora_to_unet and self.unet:
-            self.unet = get_peft_model(self.unet, lora_config)
+            self.logger.info("Applying LoRA to base UNet...")
+            self.unet = get_peft_model(self.unet, lora_config_unet)
+            self.pipeline.unet = self.unet
             self.unet.print_trainable_parameters()
-            self.logger.info("Applied LoRA to base UNet")
+
         if apply_lora_to_refiner and self.refiner_unet:
-            self.refiner_unet = get_peft_model(self.refiner_unet, lora_config)
+            self.logger.info("Applying LoRA to refiner UNet...")
+            self.refiner_unet = get_peft_model(self.refiner_unet, lora_config_unet)
+            self.pipeline.refiner_unet = self.refiner_unet
             self.refiner_unet.print_trainable_parameters()
-            self.logger.info("Applied LoRA to refiner UNet")
+
         if apply_lora_to_text_encoder and self.text_encoder:
+            self.logger.info("Applying LoRA to T5 text encoder...")
             text_target_modules = ["q", "k", "v", "o"]
             lora_config_text = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=lora_bias, target_modules=text_target_modules)
             self.text_encoder = get_peft_model(self.text_encoder, lora_config_text)
+            self.pipeline.text_encoder = self.text_encoder
             self.text_encoder.print_trainable_parameters()
-            for param in self.pipeline.projection_layer.parameters():
-                param.requires_grad = True
-                param.data = torch.nan_to_num(param.data, nan=0.0, posinf=1.0, neginf=-1.0)
-            self.logger.info("Applied LoRA to T5 text encoder")
+            if hasattr(self.pipeline, 'projection_layer'):
+                self.logger.info("Setting projection layer requires_grad=True")
+                for param in self.pipeline.projection_layer.parameters(): param.requires_grad = True
+            if hasattr(self.pipeline, 'pool_projection_layer'):
+                self.logger.info("Setting pool projection layer requires_grad=True")
+                for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = True
 
     def validate(self, val_dataloader, dataset_path):
-        if not all([self.unet, self.refiner_unet, self.pipeline, self.vae, self.scheduler]):
+        component_check_list = [self.unet, self.pipeline, self.vae, self.scheduler, self.text_encoder]
+        if not all(component_check_list):
             self.logger.error("Missing required components for validation")
             return float('inf')
+
         self.unet.eval()
-        self.refiner_unet.eval()
+        if self.refiner_unet: self.refiner_unet.eval()
         self.text_encoder.eval()
-        self.pipeline.projection_layer.eval()
+        if hasattr(self.pipeline, 'projection_layer'): self.pipeline.projection_layer.eval()
+        if hasattr(self.pipeline, 'pool_projection_layer'): self.pipeline.pool_projection_layer.eval()
         self.vae.eval()
+
         total_val_loss = 0.0
         num_val_batches = 0
-        image_folder = os.path.join(os.path.dirname(dataset_path), "images")
+        image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
+
         with torch.no_grad():
             for step, batch in enumerate(val_dataloader):
                 try:
                     image_filenames = batch.get('image')
                     prompts = batch.get('prompt')
+                    if image_filenames is None or prompts is None: continue
+
                     pixel_values_list = []
                     valid_prompts = []
                     for img_filename, prompt in zip(image_filenames, prompts):
+                        if not isinstance(prompt, str) or not prompt.strip(): continue
                         try:
                             image_path = os.path.join(image_folder, img_filename)
                             image = Image.open(image_path).convert('RGB').resize((self.image_size, self.image_size))
                             image_np = np.array(image).astype(np.float32) / 255.0
-                            if np.any(np.isnan(image_np)) or np.any(np.isinf(image_np)):
-                                self.logger.warning(f"Val Step {step+1}: NaN/Inf in image {img_filename}")
-                                continue
+                            if np.any(np.isnan(image_np)) or np.any(np.isinf(image_np)): continue
                             image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
                             pixel_values_list.append(image_tensor)
                             valid_prompts.append(prompt)
                         except Exception as img_err:
                             self.logger.debug(f"Val Skip img {img_filename}: {img_err}")
-                    if not pixel_values_list:
-                        self.logger.debug(f"Skipping val batch {step+1}: No valid images")
-                        continue
+
+                    if not pixel_values_list: continue
                     pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device, dtype=torch.float32)
                     prompts = valid_prompts
+
                     prompt_embeds, added_cond_kwargs = self.pipeline._encode_prompt(
                         prompts, self.accelerator.device, 1, False
                     )
+                    prompt_embeds = prompt_embeds.to(dtype=self.dtype)
+                    for k,v in added_cond_kwargs.items(): added_cond_kwargs[k] = v.to(dtype=self.dtype)
+
                     pixel_values_norm = pixel_values * 2.0 - 1.0
-                    vae_output = self.vae.encode(pixel_values_norm)
-                    latents = vae_output.latent_dist.sample() * self.vae.config.scaling_factor
+                    vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
+                    latents = vae_output.latent_dist.sample() * self.pipeline.vae_scale_factor
                     latents = latents.to(dtype=self.dtype)
-                    if torch.isnan(latents).any() or torch.isinf(latents).any():
-                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in latents")
-                        continue
+                    if torch.isnan(latents).any() or torch.isinf(latents).any(): continue
+
                     noise = torch.randn_like(latents)
                     timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
                     noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
                     noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
-                    # Base UNet prediction
+
                     model_pred = self.unet(
                         sample=noisy_latents,
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds,
                         added_cond_kwargs=added_cond_kwargs
                     ).sample
-                    if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
-                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in base model_pred")
-                        continue
+                    if torch.isnan(model_pred).any() or torch.isinf(model_pred).any(): continue
                     model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
-                    # Refiner UNet prediction
-                    refiner_pred = self.refiner_unet(
-                        sample=noisy_latents,
-                        timestep=timesteps,
-                        encoder_hidden_states=prompt_embeds,
-                        added_cond_kwargs=added_cond_kwargs
-                    ).sample
-                    if torch.isnan(refiner_pred).any() or torch.isinf(refiner_pred).any():
-                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in refiner_pred")
-                        continue
-                    refiner_pred = torch.nan_to_num(refiner_pred, nan=0.0, posinf=1.0, neginf=-1.0)
-                    # Combined loss
-                    base_loss = torch.nn.functional.mse_loss(model_pred.float(), noise.float(), reduction="mean")
-                    refiner_loss = torch.nn.functional.mse_loss(refiner_pred.float(), noise.float(), reduction="mean")
-                    val_loss = (base_loss + refiner_loss) / 2.0
-                    if torch.isnan(val_loss) or torch.isinf(val_loss):
-                        self.logger.warning(f"Val Step {step+1}: Calculated loss is NaN or Inf")
-                        continue
-                    total_val_loss += self.accelerator.gather(val_loss).mean().item()
-                    num_val_batches += 1
+                    base_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+                    val_loss = base_loss
+
+                    if torch.isnan(val_loss) or torch.isinf(val_loss): continue
+
+                    gathered_loss = self.accelerator.gather(val_loss.repeat(latents.shape[0]))
+                    total_val_loss += gathered_loss.mean().item() * latents.shape[0]
+                    num_val_batches += latents.shape[0]
+
                 except Exception as val_step_err:
                     self.logger.error(f"Validation step {step+1} failed: {val_step_err}\n{traceback.format_exc()}")
                     continue
+
         avg_val_loss = total_val_loss / num_val_batches if num_val_batches > 0 else float('inf')
-        self.unet.train()
-        self.refiner_unet.train()
-        self.text_encoder.train()
-        self.pipeline.projection_layer.train()
-        self.logger.info(f"Validation completed - Avg validation loss: {avg_val_loss:.4f}, Batches: {num_val_batches}")
+
+        if isinstance(self.unet, PeftModel): self.unet.train()
+        if self.refiner_unet and isinstance(self.refiner_unet, PeftModel): self.refiner_unet.train()
+        if isinstance(self.text_encoder, PeftModel): self.text_encoder.train()
+        if hasattr(self.pipeline, 'projection_layer') and self._apply_lora_text_flag:
+            self.pipeline.projection_layer.train()
+        if hasattr(self.pipeline, 'pool_projection_layer') and self._apply_lora_text_flag:
+            self.pipeline.pool_projection_layer.train()
+
+        self.logger.info(f"Validation completed - Avg validation loss: {avg_val_loss:.4f}, Items: {num_val_batches}")
         return avg_val_loss
 
     def save_model_state(self, epoch=None, val_loss=None, hyperparameters=None, subdir=None):
-        if not self.accelerator.is_main_process:
-            return
+        if not self.accelerator.is_main_process: return
         output_subdir = subdir if subdir else self.output_dir
         os.makedirs(output_subdir, exist_ok=True)
         save_label = "best"
         val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) else "N/A"
         save_paths = {}
-        if self.unet and isinstance(self.unet, PeftModel):
+
+        if isinstance(self.unet, PeftModel):
             unet_path = os.path.join(output_subdir, f"{save_label}_unet_lora")
-            self.accelerator.unwrap_model(self.unet).save_pretrained(unet_path)
-            save_paths["UNet_LoRA"] = unet_path
-            self.logger.info(f"Saved base UNet LoRA to {unet_path}")
+            try:
+                self.accelerator.unwrap_model(self.unet).save_pretrained(unet_path)
+                save_paths["UNet_LoRA"] = unet_path
+                self.logger.info(f"Saved base UNet LoRA to {unet_path}")
+            except Exception as e: self.logger.error(f"Failed to save UNet LoRA: {e}")
+
         if self.refiner_unet and isinstance(self.refiner_unet, PeftModel):
             refiner_path = os.path.join(output_subdir, f"{save_label}_refiner_unet_lora")
-            self.accelerator.unwrap_model(self.refiner_unet).save_pretrained(refiner_path)
-            save_paths["Refiner_UNet_LoRA"] = refiner_path
-            self.logger.info(f"Saved refiner UNet LoRA to {refiner_path}")
-        if self.text_encoder and isinstance(self.text_encoder, PeftModel):
+            try:
+                self.accelerator.unwrap_model(self.refiner_unet).save_pretrained(refiner_path)
+                save_paths["Refiner_UNet_LoRA"] = refiner_path
+                self.logger.info(f"Saved refiner UNet LoRA to {refiner_path}")
+            except Exception as e: self.logger.error(f"Failed to save Refiner UNet LoRA: {e}")
+
+        if isinstance(self.text_encoder, PeftModel):
             text_encoder_path = os.path.join(output_subdir, f"{save_label}_text_encoder_lora")
-            self.accelerator.unwrap_model(self.text_encoder).save_pretrained(text_encoder_path)
-            save_paths["TextEncoder_LoRA"] = text_encoder_path
-            self.logger.info(f"Saved TextEncoder LoRA to {text_encoder_path}")
-        if self.pipeline.projection_layer:
+            try:
+                self.accelerator.unwrap_model(self.text_encoder).save_pretrained(text_encoder_path)
+                save_paths["TextEncoder_LoRA"] = text_encoder_path
+                self.logger.info(f"Saved TextEncoder LoRA to {text_encoder_path}")
+            except Exception as e: self.logger.error(f"Failed to save Text Encoder LoRA: {e}")
+
+        if hasattr(self.pipeline, 'projection_layer') and self._apply_lora_text_flag:
             proj_layer_path = os.path.join(output_subdir, f"{save_label}_projection_layer.pth")
-            torch.save(self.accelerator.get_state_dict(self.pipeline.projection_layer), proj_layer_path)
-            save_paths["Projection_Layer"] = proj_layer_path
-            self.logger.info(f"Saved Projection Layer to {proj_layer_path}")
+            try:
+                torch.save(self.accelerator.get_state_dict(self.pipeline.projection_layer), proj_layer_path)
+                save_paths["Projection_Layer"] = proj_layer_path
+                self.logger.info(f"Saved Projection Layer to {proj_layer_path}")
+            except Exception as e: self.logger.error(f"Failed to save Projection Layer: {e}")
+
+        if hasattr(self.pipeline, 'pool_projection_layer') and self._apply_lora_text_flag:
+            pool_proj_layer_path = os.path.join(output_subdir, f"{save_label}_pool_projection_layer.pth")
+            try:
+                torch.save(self.accelerator.get_state_dict(self.pipeline.pool_projection_layer), pool_proj_layer_path)
+                save_paths["Pool_Projection_Layer"] = pool_proj_layer_path
+                self.logger.info(f"Saved Pool Projection Layer to {pool_proj_layer_path}")
+            except Exception as e: self.logger.error(f"Failed to save Pool Projection Layer: {e}")
+
         if hyperparameters:
-            hyperparameters.update({
-                '_apply_lora_text_encoder': self._apply_lora_text_flag,
-                '_apply_lora_unet': self._apply_lora_unet_flag,
-                '_apply_lora_refiner': self._apply_lora_refiner_flag
-            })
-            hyperparam_path = os.path.join(output_subdir, f"{save_label}_hyperparameters.json")
-            save_data = {'model_name': self.model_name, 'epoch': epoch, 'validation_loss': val_loss_str, 'hyperparameters': hyperparameters}
-            with open(hyperparam_path, 'w') as f:
-                json.dump(save_data, f, indent=4)
-            self.logger.info(f"Saved hyperparameters to {hyperparam_path}")
-        if not save_paths:
-            self.logger.warning(f"No trainable weights saved for {self.model_name} ({save_label}).")
-        else:
-            self.logger.info(f"Saved model components: {save_paths}")
+            try:
+                hyperparameters.update({
+                    '_apply_lora_text_encoder': self._apply_lora_text_flag,
+                    '_apply_lora_unet': self._apply_lora_unet_flag,
+                    '_apply_lora_refiner': self._apply_lora_refiner_flag
+                })
+                hyperparam_path = os.path.join(output_subdir, f"{save_label}_hyperparameters.json")
+                save_data = {'model_name': self.model_name, 'epoch': epoch, 'validation_loss': val_loss_str, 'hyperparameters': hyperparameters}
+                with open(hyperparam_path, 'w') as f: json.dump(save_data, f, indent=4)
+                self.logger.info(f"Saved hyperparameters to {hyperparam_path}")
+            except Exception as e: self.logger.error(f"Failed to save hyperparameters: {e}")
+
+        if not save_paths: self.logger.warning(f"No trainable weights saved for epoch {epoch}.")
+        else: self.logger.info(f"Saved model components for epoch {epoch}: {save_paths}")
 
     def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self.logger.info(f"Requested learning rate: {learning_rate}")
-        # Capping LR - keep if needed
         if learning_rate > 5e-8:
-             self.logger.warning(f"Capping learning rate at 5e-8 for stability.")
-             learning_rate = 5e-8
+            self.logger.warning(f"Capping learning rate at 5e-8 for stability.")
+            learning_rate = 5e-8
 
         self.fold_val_losses = []
         global_best_avg_val_loss = float('inf')
@@ -578,150 +603,111 @@ class FinetuneModel:
         global_best_epoch = -1
 
         for fold_idx, (train_dataset, val_dataset) in enumerate(train_val_splits):
+            self.logger.info(f"--- Starting Fold {fold_idx+1}/{len(train_val_splits)} ---")
             self.best_val_loss = float('inf')
             self.best_epoch = -1
             train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
             val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-            image_folder = os.path.join(os.path.dirname(dataset_path), "images")
+            image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
 
-            # --- Collect parameters to optimize ---
             params_to_optimize = []
-            trainable_models = [] # Keep track of models passed to accelerator
+            trainable_components = []
+            projection_layer_added = False
+            pool_projection_layer_added = False
 
             if self._apply_lora_unet_flag and isinstance(self.unet, PeftModel):
                 params_to_optimize.extend(p for p in self.unet.parameters() if p.requires_grad)
-                trainable_models.append(self.unet)
-                self.logger.info("Adding UNet LoRA parameters to optimizer.")
-            elif self._apply_lora_unet_flag: # Should be PeftModel, add warning if not
-                 self.logger.warning("apply_lora_unet is True, but UNet is not a PeftModel.")
-            # If not applying LoRA but want to fine-tune whole UNet (less common/efficient)
-            # elif not self._apply_lora_unet_flag and config allows full fine-tune:
-            #    params_to_optimize.extend(p for p in self.unet.parameters() if p.requires_grad)
-            #    trainable_models.append(self.unet)
+                trainable_components.append(self.unet)
+                self.logger.info("Adding UNet LoRA parameters.")
 
-
-            if self._apply_lora_refiner_flag and isinstance(self.refiner_unet, PeftModel):
+            if self._apply_lora_refiner_flag and self.refiner_unet is not None and isinstance(self.refiner_unet, PeftModel):
                 params_to_optimize.extend(p for p in self.refiner_unet.parameters() if p.requires_grad)
-                trainable_models.append(self.refiner_unet)
-            elif self._apply_lora_refiner_flag:
-                 self.logger.warning("apply_lora_refiner is True, but Refiner UNet is not a PeftModel.")
+                trainable_components.append(self.refiner_unet)
+                self.logger.info("Adding Refiner UNet LoRA parameters.")
 
             if self._apply_lora_text_flag and isinstance(self.text_encoder, PeftModel):
                 params_to_optimize.extend(p for p in self.text_encoder.parameters() if p.requires_grad)
-                trainable_models.append(self.text_encoder)
-                # Also ensure projection layer is trainable if text encoder LoRA is active
+                trainable_components.append(self.text_encoder)
+                self.logger.info("Adding Text Encoder LoRA parameters.")
                 if hasattr(self.pipeline, 'projection_layer'):
-                    for param in self.pipeline.projection_layer.parameters():
-                        param.requires_grad = True
-                    params_to_optimize.extend(p for p in self.pipeline.projection_layer.parameters() if p.requires_grad)
-                    # Add projection layer only if it wasn't already added via another condition
-                    if self.pipeline.projection_layer not in trainable_models:
-                         trainable_models.append(self.pipeline.projection_layer)
-                    self.logger.info("Adding Text Encoder LoRA and Projection Layer parameters to optimizer.")
-            elif hasattr(self.pipeline, 'projection_layer'): # If not training TE LoRA, ensure projection layer grads are off
-                 for param in self.pipeline.projection_layer.parameters():
-                     param.requires_grad = False
+                    self.logger.info("Setting projection layer requires_grad=True.")
+                    for param in self.pipeline.projection_layer.parameters(): param.requires_grad = True
+                    if not projection_layer_added:
+                        params_to_optimize.extend(p for p in self.pipeline.projection_layer.parameters() if p.requires_grad)
+                        trainable_components.append(self.pipeline.projection_layer)
+                        projection_layer_added = True
+                        self.logger.info("Adding Projection Layer parameters.")
+                if hasattr(self.pipeline, 'pool_projection_layer'):
+                    self.logger.info("Setting pool projection layer requires_grad=True.")
+                    for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = True
+                    if not pool_projection_layer_added:
+                        params_to_optimize.extend(p for p in self.pipeline.pool_projection_layer.parameters() if p.requires_grad)
+                        trainable_components.append(self.pipeline.pool_projection_layer)
+                        pool_projection_layer_added = True
+                        self.logger.info("Adding Pool Projection Layer parameters.")
+            elif not self._apply_lora_text_flag:
+                if hasattr(self.pipeline, 'projection_layer'):
+                    for param in self.pipeline.projection_layer.parameters(): param.requires_grad = False
+                if hasattr(self.pipeline, 'pool_projection_layer'):
+                    for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = False
 
-
-            # Always include projection layer parameters if it exists and requires grad
-            # if self.pipeline.projection_layer:
-            #      # Ensure requires_grad is True if training it (should be by default)
-            #      for param in self.pipeline.projection_layer.parameters():
-            #          param.requires_grad = True
-            #      params_to_optimize.extend(p for p in self.pipeline.projection_layer.parameters() if p.requires_grad)
-            #      trainable_models.append(self.pipeline.projection_layer) # Add projection layer
-
-            # Deduplicate parameters (important!)
             params_to_optimize = list({id(p): p for p in params_to_optimize}.values())
-            self.logger.info(f"Number of parameters to optimize: {len(params_to_optimize)}")
+            self.logger.info(f"Total unique parameters to optimize: {len(params_to_optimize)}")
 
             if not params_to_optimize:
-                self.logger.error("Optimizer params list is empty! No models marked for training (LoRA or otherwise).")
-                continue # Skip fold if nothing to train
+                self.logger.error("Optimizer params list is empty! Check LoRA flags / config.")
+                continue
 
-            # Ensure unique parameters if models share layers (unlikely here)
-            params_to_optimize = list({id(p): p for p in params_to_optimize}.values())
-            self.logger.info(f"Number of parameters to optimize: {len(params_to_optimize)}")
-            if not trainable_models:
-                 self.logger.error(f"No trainable components identified for Fold {fold_idx+1}. Skipping.")
-                 continue
+            self.optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
 
-            optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
-
-            # --- Prepare components with Accelerator ---
-            # Include all models/layers being trained, optimizer, and dataloaders
-            prepare_list = trainable_models + [optimizer, train_dataloader, val_dataloader]
+            self.logger.info(f"Preparing {len(trainable_components)} model components, optimizer, and dataloaders with Accelerator.")
+            prepare_list = trainable_components + [self.optimizer, train_dataloader, val_dataloader]
             prepared_components = self.accelerator.prepare(*prepare_list)
 
-            # Unpack prepared components carefully based on what was passed in
-            num_models = len(trainable_models)
-            prepared_models = prepared_components[:num_models]
+            num_models = len(trainable_components)
+            prepared_models_tuple = prepared_components[:num_models]
             self.optimizer, train_dataloader, val_dataloader = prepared_components[num_models:]
 
-            # Update model references (important!)
-            # This assumes the order in trainable_models is preserved by prepare
-            model_map = {type(orig).__name__: prep for orig, prep in zip(trainable_models, prepared_models)}
+            for i, original_component in enumerate(trainable_components):
+                prepared_component = prepared_models_tuple[i]
+                if original_component is self.unet:
+                    self.unet = prepared_component
+                    self.pipeline.unet = prepared_component
+                elif original_component is self.refiner_unet:
+                    self.refiner_unet = prepared_component
+                    self.pipeline.refiner_unet = prepared_component
+                elif original_component is self.text_encoder:
+                    self.text_encoder = prepared_component
+                    self.pipeline.text_encoder = prepared_component
+                elif original_component is self.pipeline.projection_layer:
+                    self.pipeline.projection_layer = prepared_component
+                elif original_component is self.pipeline.pool_projection_layer:
+                    self.pipeline.pool_projection_layer = prepared_component
 
-            if self.unet in trainable_models: self.unet = model_map.get('PeftModel', self.unet) # Assumes LoRA UNet is PeftModel
-            if self.refiner_unet in trainable_models: self.refiner_unet = model_map.get('PeftModel', self.refiner_unet) # Assumes LoRA Refiner is PeftModel
-            if self.text_encoder in trainable_models: self.text_encoder = model_map.get('PeftModel', self.text_encoder) # Assumes LoRA TE is PeftModel
-            if self.pipeline.projection_layer in trainable_models: self.pipeline.projection_layer = model_map.get('Linear', self.pipeline.projection_layer) # Projection is Linear
-
-            # Models *not* trained but used (like VAE) should still be moved to device
-            self.pipeline.to(self.accelerator.device) # Ensure pipeline components are on device
-            self.vae.to(self.accelerator.device)
-            self.vae.eval() # Keep VAE in eval mode
-
-
-            hyperparameters = {
-                'model_name': self.model_name,
-                'text_encoder': 't5-base',
-                'epochs': epochs,
-                'batch_size': batch_size * self.accelerator.num_processes, # Adjust effective batch size
-                'learning_rate': learning_rate,
-                'gradient_accumulation_steps': gradient_accumulation_steps,
-                'lora_r': lora_r,
-                'lora_alpha': lora_alpha,
-                'lora_dropout': lora_dropout
-            }
-
-            num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
-            max_train_steps = epochs * num_update_steps_per_epoch
+            max_train_steps = epochs * math.ceil(len(train_dataloader) / gradient_accumulation_steps)
             global_step = 0
-
-            self.logger.info(f"***** Running training for Fold {fold_idx+1} *****")
-            self.logger.info(f"  Num examples = {len(train_dataset)}")
-            self.logger.info(f"  Num Epochs = {epochs}")
-            self.logger.info(f"  Instantaneous batch size per device = {batch_size}")
-            self.logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {batch_size * self.accelerator.num_processes * gradient_accumulation_steps}")
-            self.logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
-            self.logger.info(f"  Total optimization steps = {max_train_steps}")
+            self.logger.info(f"Fold {fold_idx+1}: Total optimization steps = {max_train_steps}")
 
             for epoch in range(epochs):
                 self.current_epoch = epoch + 1
-                # Set models to train mode (accelerator might handle this, but explicit is fine)
-                for model in prepared_models: model.train()
+                for model_component in prepared_models_tuple:
+                    model_component.train()
 
                 train_loss_epoch = 0.0
                 num_train_batches_epoch = 0
                 num_skipped_steps = 0
 
                 for step, batch in enumerate(train_dataloader):
-                    # Check if batch is smaller than expected due to dataset size & num_processes
-                    is_final_batch = (step == len(train_dataloader) - 1)
-
                     try:
                         image_filenames = batch.get('image')
                         prompts = batch.get('prompt')
                         if image_filenames is None or prompts is None:
-                             self.logger.warning(f"Train Step {step+1}: Batch missing 'image' or 'prompt'. Skipping.")
-                             continue
+                            self.logger.warning(f"Train Step {step+1}: Batch missing 'image' or 'prompt'. Skipping.")
+                            continue
 
-                        # --- Image Loading and Preprocessing ---
                         pixel_values_list = []
                         valid_prompts = []
                         for img_filename, prompt in zip(image_filenames, prompts):
-                            # Basic check for valid prompt
                             if not isinstance(prompt, str) or not prompt.strip():
                                 self.logger.warning(f"Train Step {step+1}: Invalid or empty prompt for image {img_filename}. Skipping item.")
                                 continue
@@ -732,7 +718,7 @@ class FinetuneModel:
                                 if np.any(np.isnan(image_np)) or np.any(np.isinf(image_np)):
                                     self.logger.warning(f"Train Step {step+1}: NaN/Inf in image {img_filename}. Skipping item.")
                                     continue
-                                image_tensor = torch.from_numpy(image_np).permute(2, 0, 1) # C, H, W
+                                image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
                                 pixel_values_list.append(image_tensor)
                                 valid_prompts.append(prompt)
                             except FileNotFoundError:
@@ -744,58 +730,32 @@ class FinetuneModel:
                             self.logger.debug(f"Skipping train batch {step+1}: No valid image/prompt pairs.")
                             continue
 
-                        # Stack valid images and convert to target device/dtype
-                        pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device, dtype=torch.float32) # Keep images fp32 for VAE
-                        prompts = valid_prompts # Use only prompts corresponding to valid images
+                        pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device, dtype=torch.float32)
+                        prompts = valid_prompts
 
-                        # --- Training Step ---
-                        # Use accelerator.accumulate context manager for gradient accumulation
-                        with self.accelerator.accumulate(*prepared_models): # Pass all models being trained
-                            # Use autocast for mixed precision
+                        with self.accelerator.accumulate(*prepared_models_tuple):
                             with torch.cuda.amp.autocast(enabled=self.accelerator.mixed_precision == 'fp16'):
-                                # 1. Encode Prompts (using pipeline's method)
-                                # Ensure T5 encoder is in training mode if LoRA applied
-                                if self.text_encoder in prepared_models: self.text_encoder.train()
-                                # Ensure projection layer is in training mode
-                                if self.pipeline.projection_layer in prepared_models: self.pipeline.projection_layer.train()
-
                                 prompt_embeds, added_cond_kwargs = self.pipeline._encode_prompt(
-                                    prompts, self.accelerator.device, 1, False # is_train=True? No CFG needed
+                                    prompts, self.accelerator.device, 1, False
                                 )
-                                # Ensure embeds are on correct device/dtype
                                 prompt_embeds = prompt_embeds.to(dtype=self.dtype)
-                                for k, v in added_cond_kwargs.items():
-                                    added_cond_kwargs[k] = v.to(dtype=self.dtype)
+                                for k,v in added_cond_kwargs.items(): added_cond_kwargs[k] = v.to(dtype=self.dtype)
 
-
-                                # 2. Encode Images to Latents (VAE in eval mode, no gradients)
-                                # VAE requires fp32 input typically
                                 pixel_values_norm = pixel_values * 2.0 - 1.0
-                                with torch.no_grad(): # Ensure no gradients for VAE
-                                    vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype)) # Use VAE's expected dtype
-                                    latents = vae_output.latent_dist.sample() * self.vae.config.scaling_factor
-                                    latents = latents.to(dtype=self.dtype) # Convert latents to training dtype
-
+                                with torch.no_grad():
+                                    vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
+                                    latents = vae_output.latent_dist.sample() * self.pipeline.vae_scale_factor
+                                    latents = latents.to(dtype=self.dtype)
                                 if torch.isnan(latents).any() or torch.isinf(latents).any():
-                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf detected in latents. Skipping step.")
-                                    # Consider zeroing gradients accumulated so far for this step if possible?
-                                    self.optimizer.zero_grad() # Zero grad to prevent issue propagation
+                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents. Skipping.")
+                                    self.optimizer.zero_grad()
                                     continue
 
-                                # 3. Sample Noise and Timesteps
                                 noise = torch.randn_like(latents)
                                 timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
-
-                                # 4. Add Noise to Latents
                                 noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
-                                noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0) # Clip/replace invalid numbers
+                                noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
 
-                                # 5. Predict Noise using UNets (Base and Refiner)
-                                # Ensure UNets are in training mode
-                                if self.unet in prepared_models: self.unet.train()
-                                if self.refiner_unet in prepared_models: self.refiner_unet.train()
-
-                                # Base UNet prediction
                                 model_pred = self.unet(
                                     sample=noisy_latents,
                                     timestep=timesteps,
@@ -803,150 +763,106 @@ class FinetuneModel:
                                     added_cond_kwargs=added_cond_kwargs
                                 ).sample
                                 if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
-                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in base model_pred. Skipping step.")
+                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in base model_pred. Skipping.")
                                     self.optimizer.zero_grad()
                                     continue
                                 model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
 
-
-                                # Refiner UNet prediction (using same inputs for simplicity in training)
-                                refiner_pred = torch.tensor(0.0, device=latents.device) # Default if not training refiner
-                                refiner_loss = torch.tensor(0.0, device=latents.device)
-                                loss_count = 1.0 # Start with base loss
-
-                                if self.refiner_unet in prepared_models: # Only compute if refiner is being trained
-                                    refiner_pred = self.refiner_unet(
-                                        sample=noisy_latents, # Use same noisy latents
-                                        timestep=timesteps,   # Use same timesteps
-                                        encoder_hidden_states=prompt_embeds,
-                                        added_cond_kwargs=added_cond_kwargs
-                                    ).sample
-                                    if torch.isnan(refiner_pred).any() or torch.isinf(refiner_pred).any():
-                                         self.logger.warning(f"Train Step {step+1}: NaN/Inf in refiner_pred. Skipping step.")
-                                         self.optimizer.zero_grad()
-                                         continue
-                                    refiner_pred = torch.nan_to_num(refiner_pred, nan=0.0, posinf=1.0, neginf=-1.0)
-                                    refiner_loss = torch.nn.functional.mse_loss(refiner_pred.float(), noise.float(), reduction="mean")
-                                    loss_count += 1.0
-
-
-                                # 6. Calculate Loss
-                                # Target is the original noise
-                                base_loss = torch.nn.functional.mse_loss(model_pred.float(), noise.float(), reduction="mean")
-
-                                # Combine losses (average if both are computed)
-                                loss = (base_loss + refiner_loss) / loss_count
-
+                                base_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+                                loss = base_loss
 
                                 if torch.isnan(loss) or torch.isinf(loss):
-                                    self.logger.warning(f"Train Step {step+1}: Calculated loss is NaN or Inf. Skipping step.")
+                                    self.logger.warning(f"Train Step {step+1}: Calculated loss is NaN/Inf. Skipping.")
                                     self.optimizer.zero_grad()
                                     continue
 
-                            # --- Backpropagation and Optimization ---
-                            # Scale loss for gradient accumulation
-                            # accelerator.backward handles mixed precision scaling automatically
-                            self.accelerator.backward(loss) # Removed division by grad_accum steps, accelerator handles it? Check docs. Re-add if needed.
-                            # Let's assume backward needs the scaled loss if accumulate context doesn't do it
-                            # self.accelerator.backward(loss / gradient_accumulation_steps)
+                            self.accelerator.backward(loss)
 
-                            # Optimizer step occurs only when gradients are synchronized
                             if self.accelerator.sync_gradients:
                                 valid_gradients = True
-                                grad_norm = torch.tensor(0.0, device=self.device) # Initialize grad_norm
                                 try:
-                                    # Clip gradients only for the parameters being optimized
-                                    grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 1.0) # Use 1.0 as max_norm
-                                    # Check for NaN/Inf in grad_norm itself
+                                    grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 1.0)
                                     if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf gradient norm detected ({grad_norm.item()}). Skipping optimizer step.")
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf gradient norm ({grad_norm.item()}). Skipping step.")
                                         valid_gradients = False
-                                    else:
-                                         self.logger.debug(f"Train Step {step+1}: Grad norm: {grad_norm.item():.4f}")
                                 except Exception as clip_err:
-                                    # Catch potential errors during clipping itself (e.g., empty param list?)
-                                    self.logger.warning(f"Train Step {step+1}: Error during gradient clipping: {clip_err}. Skipping optimizer step.")
+                                    self.logger.warning(f"Train Step {step+1}: Error during gradient clipping: {clip_err}. Skipping step.")
                                     valid_gradients = False
 
                                 if valid_gradients:
-                                    self.optimizer.step() # Perform optimizer step
-                                    self.optimizer.zero_grad() # Reset gradients
+                                    self.optimizer.step()
+                                    self.optimizer.zero_grad()
                                 else:
-                                    # Gradients were invalid, ensure they are zeroed before next accumulation
                                     self.optimizer.zero_grad()
                                     num_skipped_steps += 1
-                                global_step += 1 # Increment global step only on optimizer step
+                                global_step += 1
 
-                            # --- Logging ---
-                            # Gather loss across processes for logging
-                            avg_loss = self.accelerator.gather(loss.repeat(batch_size)).mean() # Use gather on the unscaled loss
-                            train_loss_epoch += avg_loss.item() # Accumulate gathered loss
+                            avg_loss = self.accelerator.gather(loss.repeat(latents.shape[0])).mean()
+                            train_loss_epoch += avg_loss.item()
                             num_train_batches_epoch += 1
 
-                            if self.accelerator.is_main_process and global_step % 50 == 0: # Log every 50 optimizer steps
-                                self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {avg_loss.item():.4f}, Skipped Steps: {num_skipped_steps}")
+                            if self.accelerator.is_main_process and (global_step % 50 == 0 or step == len(train_dataloader) - 1):
+                                self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {avg_loss.item():.4f}")
 
-
-                    # --- Error Handling for Batch ---
                     except Exception as e:
-                        self.logger.error(f"Training step {step+1} (Fold {fold_idx+1}, Epoch {self.current_epoch}) failed: {e}\n{traceback.format_exc()}")
-                        if "out of memory" in str(e).lower():
-                            self.logger.error("OOM Error detected during training step. Consider reducing batch size or enabling more memory optimization techniques.")
-                            # Optional: break epoch or attempt recovery
-                        # Ensure gradients are zeroed if an error occurred mid-step
-                        if self.accelerator.sync_gradients:
-                             self.optimizer.zero_grad()
-                        continue # Continue to next batch
+                        self.logger.error(f"Training step {step+1} failed: {e}\n{traceback.format_exc()}")
+                        try:
+                            if self.accelerator.sync_gradients: self.optimizer.zero_grad()
+                        except Exception: pass
+                        continue
 
-                # --- End of Epoch ---
                 avg_train_loss_epoch = train_loss_epoch / num_train_batches_epoch if num_train_batches_epoch > 0 else float('nan')
-                self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Total Skipped Steps: {num_skipped_steps}")
+                self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Skipped Opt Steps: {num_skipped_steps}")
 
-                # --- Validation ---
-                if self.accelerator.is_main_process: # Perform validation only on main process
+                if self.accelerator.is_main_process:
                     self.logger.info(f"Running validation for Fold {fold_idx+1}, Epoch {self.current_epoch}...")
-                    # Pass prepared models (potentially wrapped by accelerator) to validate
-                    avg_val_loss = self.validate(val_dataloader, dataset_path) # Validate uses models in eval mode internally
-
+                    avg_val_loss = self.validate(val_dataloader, dataset_path)
                     if not np.isnan(avg_val_loss) and avg_val_loss < self.best_val_loss:
                         self.best_val_loss = avg_val_loss
                         self.best_epoch = self.current_epoch
-                        save_dir = os.path.join(self.output_dir, f"fold_{fold_idx+1}_best_model") # Save best model per fold
+                        save_dir = os.path.join(self.output_dir, f"fold_{fold_idx+1}_best_model")
                         self.logger.info(f"*** New best validation loss for Fold {fold_idx+1}: {avg_val_loss:.4f} at Epoch {self.current_epoch} ***")
-                        self.save_model_state(epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters=hyperparameters, subdir=save_dir)
+                        self.save_model_state(epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters={
+                            'model_name': self.model_name,
+                            'text_encoder': 't5-base',
+                            'epochs': epochs,
+                            'batch_size': batch_size * self.accelerator.num_processes,
+                            'learning_rate': learning_rate,
+                            'gradient_accumulation_steps': gradient_accumulation_steps,
+                            'lora_r': lora_r,
+                            'lora_alpha': lora_alpha,
+                            'lora_dropout': lora_dropout
+                        }, subdir=save_dir)
                     else:
-                         self.logger.info(f"Validation loss ({avg_val_loss:.4f}) did not improve from best ({self.best_val_loss:.4f})")
+                        self.logger.info(f"Validation loss ({avg_val_loss:.4f}) did not improve from best ({self.best_val_loss:.4f})")
 
-
-                # Wait for all processes before starting next epoch or finishing fold
                 self.accelerator.wait_for_everyone()
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            # --- End of Fold ---
-            self.fold_val_losses.append(self.best_val_loss) # Store best val loss for this fold
+            self.fold_val_losses.append(self.best_val_loss)
             if self.accelerator.is_main_process:
                 self.logger.info(f"Fold {fold_idx+1} finished. Best Validation Loss: {self.best_val_loss:.4f} at Epoch {self.best_epoch}")
                 if self.best_val_loss < global_best_avg_val_loss:
                     global_best_avg_val_loss = self.best_val_loss
-                    global_best_hyperparameters = hyperparameters # Store the hyperparams that led to the best fold
-                    global_best_epoch = self.best_epoch # Store the epoch from the best fold
+                    global_best_hyperparameters = {
+                        'model_name': self.model_name,
+                        'text_encoder': 't5-base',
+                        'epochs': epochs,
+                        'batch_size': batch_size * self.accelerator.num_processes,
+                        'learning_rate': learning_rate,
+                        'gradient_accumulation_steps': gradient_accumulation_steps,
+                        'lora_r': lora_r,
+                        'lora_alpha': lora_alpha,
+                        'lora_dropout': lora_dropout
+                    }
+                    global_best_epoch = self.best_epoch
 
-            # Cleanup for next fold - potentially reload fresh model weights?
-            # Depending on setup, LoRA weights might persist. Need to reset or reload.
-            # Simplest is to re-initialize FinetuneModel for each hyperparam config,
-            # but for k-fold with *same* hyperparams, need to reset weights between folds.
-            # Current code re-uses the model state. Add reloading if needed.
-
-
-        # --- End of K-Fold Cross-Validation ---
         valid_losses = [loss for loss in self.fold_val_losses if loss != float('inf') and not np.isnan(loss)]
         avg_kfold_val_loss = np.mean(valid_losses) if valid_losses else float('inf')
-        self.logger.info(f"K-Fold Training Finished for current hyperparameters - Avg Best Validation Loss across {len(valid_losses)} valid folds: {avg_kfold_val_loss:.4f}")
+        self.logger.info(f"K-Fold Training Finished - Avg Best Validation Loss across {len(valid_losses)} valid folds: {avg_kfold_val_loss:.4f}")
 
-        # Return the average best loss across folds for this hyperparameter set
-        return avg_kfold_val_loss, None, global_best_hyperparameters, global_best_epoch # Return hyperparams associated with the single best fold
-
+        return avg_kfold_val_loss, None, global_best_hyperparameters, global_best_epoch
 
 # --- Main Execution ---
 def run_finetune(config_path):
@@ -955,18 +871,15 @@ def run_finetune(config_path):
         print("Exiting due to config load failure.")
         return
 
-    # --- Accelerator Setup ---
     gradient_accumulation_steps = config.get("gradient_accumulation_steps", 8)
-    mixed_precision = config.get("mixed_precision", 'fp16') # Ensure config can specify this
+    mixed_precision = config.get("mixed_precision", 'fp16')
     output_dir = config.get("base_output_dir", "./output")
     project_dir = os.path.join(output_dir, "logs")
 
-    # Ensure log directory exists before initializing Accelerator with TensorBoard
     if not os.path.exists(project_dir):
         os.makedirs(project_dir, exist_ok=True)
         print(f"Created project directory for logs: {project_dir}")
 
-    # Try installing tensorboard if missing
     try:
         import tensorboard
         log_with = "tensorboard"
@@ -974,8 +887,6 @@ def run_finetune(config_path):
     except ImportError:
         log_with = None
         print("TensorBoard not found. Skipping TensorBoard logging.")
-        print("You can install it using: pip install tensorboard")
-
 
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -984,24 +895,19 @@ def run_finetune(config_path):
         project_dir=project_dir
     )
 
-    # Setup logging AFTER accelerator init to potentially use accelerator.is_main_process
-    # Basic logging setup was already done, enhance or use accelerator's logger
-    global logger # Access the global logger
-    logger = get_logger(__name__, log_level="INFO") # Use accelerator's logger setup
-    logger.info(f"Logging to {LOG_FILE} and accelerator handlers (if any).") # Log file setup remains
-    logger.info(accelerator.state, main_process_only=False) # Log state on all processes
+    global logger
+    logger = get_logger(__name__, log_level="INFO")
+    logger.info(f"Logging to {LOG_FILE} and accelerator handlers (if any).")
+    logger.info(accelerator.state, main_process_only=False)
 
-
-    # --- Dataset Loading ---
     dataset_path = config.get("dataset_path", "/home/iris/Documents/deep_learning/data/finetune_dataset/coco/dataset.json")
     if not os.path.exists(dataset_path):
         logger.error(f"Dataset JSON path not found: {dataset_path}")
         return
     logger.info(f"Loading dataset from: {dataset_path}")
 
-    # Assume load_dataset returns a standard PyTorch Dataset or compatible object
     try:
-        full_dataset = load_dataset(dataset_path) # Make sure load_dataset is correctly implemented
+        full_dataset = load_dataset(dataset_path)
         if full_dataset is None or len(full_dataset) == 0:
             logger.error("load_dataset returned None or empty dataset.")
             return
@@ -1010,8 +916,6 @@ def run_finetune(config_path):
         logger.error(f"Failed to load dataset: {e}\n{traceback.format_exc()}")
         return
 
-
-    # --- K-Fold Setup ---
     k_folds = config.get("k_folds", 5)
     if k_folds < 2:
         logger.warning(f"k_folds set to {k_folds}. Disabling cross-validation. Using 80/20 train/val split.")
@@ -1023,23 +927,18 @@ def run_finetune(config_path):
         logger.info(f"Setting up K-Fold cross-validation with k={k_folds}")
         kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
         try:
-             train_val_splits = [(Subset(full_dataset, train_idx), Subset(full_dataset, val_idx))
-                                 for train_idx, val_idx in kf.split(range(len(full_dataset)))]
-             logger.info(f"Created {len(train_val_splits)} train/validation splits.")
+            train_val_splits = [(Subset(full_dataset, train_idx), Subset(full_dataset, val_idx))
+                                for train_idx, val_idx in kf.split(range(len(full_dataset)))]
+            logger.info(f"Created {len(train_val_splits)} train/validation splits.")
         except Exception as e:
             logger.error(f"Failed to create K-Fold splits: {e}\n{traceback.format_exc()}")
             return
 
-
-    # --- Output Directory ---
     base_output_dir = config.get("base_output_dir", "/home/iris/Documents/deep_learning/experiments/sdxl_t5_refiner")
     if accelerator.is_main_process:
         os.makedirs(base_output_dir, exist_ok=True)
         logger.info(f"Base output directory: {base_output_dir}")
 
-
-    # --- Hyperparameter Grid ---
-    # Ensure default values are lists for product
     param_grid = {
         'learning_rate': config.get("learning_rate", [5e-8]),
         'lora_r': config.get("lora_r", [8]),
@@ -1047,11 +946,10 @@ def run_finetune(config_path):
         'apply_lora_refiner': config.get("apply_lora_refiner", [True]),
         'apply_lora_text_encoder': config.get("apply_lora_text_encoder", [False]),
         'epochs': config.get("epochs", [5]),
-        'batch_size': config.get("batch_size", [1]), # This is per-device batch size
+        'batch_size': config.get("batch_size", [1]),
         'lora_alpha': config.get("lora_alpha", [16]),
         'lora_dropout': config.get("lora_dropout", [0.1])
     }
-    # Convert single values to lists for product
     for key in param_grid:
         if not isinstance(param_grid[key], list):
             param_grid[key] = [param_grid[key]]
@@ -1060,10 +958,8 @@ def run_finetune(config_path):
     hyperparam_configs = [dict(zip(keys, v)) for v in product(*values)]
     logger.info(f"Generated {len(hyperparam_configs)} hyperparameter configurations to test.")
 
-
-    # --- Training Loop ---
     performance_records = []
-    model_name = "sdxl_t5_refiner" # Model identifier
+    model_name = "sdxl_t5_refiner"
     overall_best_avg_kfold_loss = float('inf')
     best_performing_config_info = None
 
@@ -1076,16 +972,10 @@ def run_finetune(config_path):
         logger.info(f"--- Running {config_name} ({idx+1}/{len(hyperparam_configs)}) ---")
         logger.info(f"Hyperparameters: {hyperparams}")
 
-        # Instantiate the model trainer FOR EACH hyperparameter config
-        # This ensures fresh model weights are loaded each time
         finetuner = FinetuneModel(model_name, config_output_dir, accelerator, logger_instance=logger)
-
         try:
-            # 1. Load base model weights
             logger.info("Loading base model...")
             finetuner.load_model()
-
-            # 2. Modify architecture (Apply LoRA adapters)
             logger.info("Modifying architecture (applying LoRA if configured)...")
             finetuner.modify_architecture(
                 apply_lora_to_unet=hyperparams['apply_lora_unet'],
@@ -1095,45 +985,34 @@ def run_finetune(config_path):
                 lora_alpha=hyperparams['lora_alpha'],
                 lora_dropout=hyperparams['lora_dropout']
             )
-
-            # 3. Run Fine-tuning with K-Fold Cross-Validation
             logger.info("Starting K-Fold fine-tuning...")
             avg_kfold_val_loss, _, best_fold_hyperparams, best_fold_epoch = finetuner.fine_tune(
                 dataset_path=dataset_path,
-                train_val_splits=train_val_splits, # Pass the generated splits
+                train_val_splits=train_val_splits,
                 epochs=hyperparams['epochs'],
-                batch_size=hyperparams['batch_size'], # Per-device batch size
+                batch_size=hyperparams['batch_size'],
                 learning_rate=float(hyperparams['learning_rate']),
                 gradient_accumulation_steps=gradient_accumulation_steps,
                 lora_r=hyperparams['lora_r'],
                 lora_alpha=hyperparams['lora_alpha'],
                 lora_dropout=hyperparams['lora_dropout']
             )
-
-            # Record performance on the main process
             if accelerator.is_main_process:
-                 record = {
+                record = {
                     'config_idx': idx,
                     'config_name': config_name,
                     'hyperparameters': hyperparams,
                     'avg_kfold_val_loss': avg_kfold_val_loss if not np.isnan(avg_kfold_val_loss) else 'NaN',
-                    'fold_losses': finetuner.fold_val_losses, # Best loss from each fold
-                    # 'best_fold_epoch': best_fold_epoch # Epoch corresponding to the single best fold overall
-                 }
-                 performance_records.append(record)
-                 logger.info(f"Finished run for {config_name}. Avg K-Fold Val Loss: {avg_kfold_val_loss:.4f}")
-
-                 # Check if this config is the best overall based on avg k-fold loss
-                 if not np.isnan(avg_kfold_val_loss) and avg_kfold_val_loss < overall_best_avg_kfold_loss:
-                     overall_best_avg_kfold_loss = avg_kfold_val_loss
-                     best_performing_config_info = record # Save the entire record
-                     logger.info(f"*** New overall best performance found! Config {idx}, Avg K-Fold Loss: {avg_kfold_val_loss:.4f} ***")
-                     # Note: Saving of the "best" model happens per-fold inside fine_tune based on that fold's val loss.
-                     # Here we just track which hyperparam config performed best on average.
-
+                    'fold_losses': finetuner.fold_val_losses,
+                }
+                performance_records.append(record)
+                logger.info(f"Finished run for {config_name}. Avg K-Fold Val Loss: {avg_kfold_val_loss:.4f}")
+                if not np.isnan(avg_kfold_val_loss) and avg_kfold_val_loss < overall_best_avg_kfold_loss:
+                    overall_best_avg_kfold_loss = avg_kfold_val_loss
+                    best_performing_config_info = record
+                    logger.info(f"*** New overall best performance found! Config {idx}, Avg K-Fold Loss: {avg_kfold_val_loss:.4f} ***")
         except Exception as e:
             logger.error(f"Run FAILED for {config_name}: {e}\n{traceback.format_exc()}")
-            # Record failure on main process
             if accelerator.is_main_process:
                 performance_records.append({
                     'config_idx': idx,
@@ -1143,22 +1022,17 @@ def run_finetune(config_path):
                     'fold_losses': [],
                     'error': str(e)
                 })
-
         finally:
-            # Clean up GPU memory before next hyperparameter run
             del finetuner
             gc.collect()
             torch.cuda.empty_cache()
             logger.info(f"--- Finished {config_name} ---")
-            accelerator.wait_for_everyone() # Sync before next loop iteration
+            accelerator.wait_for_everyone()
 
-
-    # --- Save Summary ---
     if accelerator.is_main_process:
         summary_path = os.path.join(base_output_dir, "hyperparameter_performance_summary.json")
         logger.info(f"Saving performance summary to {summary_path}")
         try:
-            # Convert numpy types to standard types for JSON serialization
             def convert_numpy_types(obj):
                 if isinstance(obj, np.integer): return int(obj)
                 elif isinstance(obj, np.floating): return float(obj)
@@ -1166,11 +1040,9 @@ def run_finetune(config_path):
                 elif isinstance(obj, dict): return {k: convert_numpy_types(v) for k, v in obj.items()}
                 elif isinstance(obj, list): return [convert_numpy_types(i) for i in obj]
                 return obj
-
             serializable_records = convert_numpy_types(performance_records)
             with open(summary_path, 'w') as f:
                 json.dump(serializable_records, f, indent=4)
-
             if best_performing_config_info:
                 logger.info(f"--- Overall Best Performing Configuration ---")
                 logger.info(f"  Config Index: {best_performing_config_info['config_idx']}")
@@ -1180,16 +1052,12 @@ def run_finetune(config_path):
                 logger.info(f"  Best model weights saved within fold directories inside: {os.path.join(base_output_dir, best_performing_config_info['config_name'])}")
             else:
                 logger.warning("No configuration completed successfully or achieved a valid validation loss.")
-
         except Exception as e:
-             logger.error(f"Failed to save performance summary: {e}")
-
+            logger.error(f"Failed to save performance summary: {e}")
 
     logger.info("Finetuning script completed.")
 
-
 if __name__ == "__main__":
-    # Ensure the config path is correct
     config_path = "/home/iris/Documents/deep_learning/config/config.yaml"
     if not os.path.exists(config_path):
         print(f"ERROR: Configuration file not found at {config_path}")
