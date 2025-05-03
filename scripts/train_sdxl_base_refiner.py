@@ -145,7 +145,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL AddEmbs({pooled_embed_dim})")
             self.pool_projection_layer = torch.nn.Linear(t5_hidden_size, pooled_embed_dim)
             torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.01)
-            torch.nn.init.zeros_(self.pool_projection_layer.bias)
+            torch.nn.init.zeros_(self.projection_layer.bias)
         else:
             self.pool_projection_layer = pool_projection_layer
 
@@ -540,8 +540,8 @@ class FinetuneModel:
         if not self.accelerator.is_main_process: return
         output_subdir = subdir if subdir else self.output_dir
         os.makedirs(output_subdir, exist_ok=True)
-        save_label = "best"
         val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) else "N/A"
+        save_label = f"best_loss_{val_loss_str}"  # Include loss in filename
         save_paths = {}
 
         if isinstance(self.unet, PeftModel):
@@ -606,99 +606,102 @@ class FinetuneModel:
             self.logger.warning(f"Capping learning rate at 5e-8 for stability.")
             learning_rate = 5e-8
 
-        self.fold_val_losses = []
-        global_best_avg_val_loss = float('inf')
-        global_best_hyperparameters = None
-        global_best_epoch = -1
+        best_avg_kfold_val_loss = float('inf')
+        best_epoch = -1
+        best_hyperparameters = None
+        fold_val_losses_per_epoch = []  # List to store validation losses for each fold per epoch
 
-        for fold_idx, (train_dataset, val_dataset) in enumerate(train_val_splits):
-            self.logger.info(f"--- Starting Fold {fold_idx+1}/{len(train_val_splits)} ---")
-            self.best_val_loss = float('inf')
-            self.best_epoch = -1
-            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-            image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
+        for epoch in range(epochs):
+            self.current_epoch = epoch + 1
+            self.fold_val_losses = []  # Reset per-epoch fold losses
+            checkpoint_state = None  # Store model state for the epoch
 
-            params_to_optimize = []
-            trainable_components = []
-            projection_layer_added = False
-            pool_projection_layer_added = False
+            for fold_idx, (train_dataset, val_dataset) in enumerate(train_val_splits):
+                self.logger.info(f"--- Training Fold {fold_idx+1}/{len(train_val_splits)} for Epoch {self.current_epoch} ---")
+                train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+                val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+                image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
 
-            if self._apply_lora_unet_flag and isinstance(self.unet, PeftModel):
-                params_to_optimize.extend(p for p in self.unet.parameters() if p.requires_grad)
-                trainable_components.append(self.unet)
-                self.logger.info("Adding UNet LoRA parameters.")
+                # Prepare trainable components and optimizer
+                params_to_optimize = []
+                trainable_components = []
+                projection_layer_added = False
+                pool_projection_layer_added = False
 
-            if self._apply_lora_refiner_flag and self.refiner_unet is not None and isinstance(self.refiner_unet, PeftModel):
-                params_to_optimize.extend(p for p in self.refiner_unet.parameters() if p.requires_grad)
-                trainable_components.append(self.refiner_unet)
-                self.logger.info("Adding Refiner UNet LoRA parameters.")
+                if self._apply_lora_unet_flag and isinstance(self.unet, PeftModel):
+                    params_to_optimize.extend(p for p in self.unet.parameters() if p.requires_grad)
+                    trainable_components.append(self.unet)
+                    self.logger.info("Adding UNet LoRA parameters.")
 
-            if self._apply_lora_text_flag and isinstance(self.text_encoder, PeftModel):
-                params_to_optimize.extend(p for p in self.text_encoder.parameters() if p.requires_grad)
-                trainable_components.append(self.text_encoder)
-                self.logger.info("Adding Text Encoder LoRA parameters.")
-                if hasattr(self.pipeline, 'projection_layer'):
-                    self.logger.info("Setting projection layer requires_grad=True.")
-                    for param in self.pipeline.projection_layer.parameters(): param.requires_grad = True
-                    if not projection_layer_added:
-                        params_to_optimize.extend(p for p in self.pipeline.projection_layer.parameters() if p.requires_grad)
-                        trainable_components.append(self.pipeline.projection_layer)
-                        projection_layer_added = True
-                        self.logger.info("Adding Projection Layer parameters.")
-                if hasattr(self.pipeline, 'pool_projection_layer'):
-                    self.logger.info("Setting pool projection layer requires_grad=True.")
-                    for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = True
-                    if not pool_projection_layer_added:
-                        params_to_optimize.extend(p for p in self.pipeline.pool_projection_layer.parameters() if p.requires_grad)
-                        trainable_components.append(self.pipeline.pool_projection_layer)
-                        pool_projection_layer_added = True
-                        self.logger.info("Adding Pool Projection Layer parameters.")
-            elif not self._apply_lora_text_flag:
-                if hasattr(self.pipeline, 'projection_layer'):
-                    for param in self.pipeline.projection_layer.parameters(): param.requires_grad = False
-                if hasattr(self.pipeline, 'pool_projection_layer'):
-                    for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = False
+                if self._apply_lora_refiner_flag and self.refiner_unet is not None and isinstance(self.refiner_unet, PeftModel):
+                    params_to_optimize.extend(p for p in self.refiner_unet.parameters() if p.requires_grad)
+                    trainable_components.append(self.refiner_unet)
+                    self.logger.info("Adding Refiner UNet LoRA parameters.")
 
-            params_to_optimize = list({id(p): p for p in params_to_optimize}.values())
-            self.logger.info(f"Total unique parameters to optimize: {len(params_to_optimize)}")
+                if self._apply_lora_text_flag and isinstance(self.text_encoder, PeftModel):
+                    params_to_optimize.extend(p for p in self.text_encoder.parameters() if p.requires_grad)
+                    trainable_components.append(self.text_encoder)
+                    self.logger.info("Adding Text Encoder LoRA parameters.")
+                    if hasattr(self.pipeline, 'projection_layer'):
+                        self.logger.info("Setting projection layer requires_grad=True.")
+                        for param in self.pipeline.projection_layer.parameters(): param.requires_grad = True
+                        if not projection_layer_added:
+                            params_to_optimize.extend(p for p in self.pipeline.projection_layer.parameters() if p.requires_grad)
+                            trainable_components.append(self.pipeline.projection_layer)
+                            projection_layer_added = True
+                            self.logger.info("Adding Projection Layer parameters.")
+                    if hasattr(self.pipeline, 'pool_projection_layer'):
+                        self.logger.info("Setting pool projection layer requires_grad=True.")
+                        for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = True
+                        if not pool_projection_layer_added:
+                            params_to_optimize.extend(p for p in self.pipeline.pool_projection_layer.parameters() if p.requires_grad)
+                            trainable_components.append(self.pipeline.pool_projection_layer)
+                            pool_projection_layer_added = True
+                            self.logger.info("Adding Pool Projection Layer parameters.")
+                elif not self._apply_lora_text_flag:
+                    if hasattr(self.pipeline, 'projection_layer'):
+                        for param in self.pipeline.projection_layer.parameters(): param.requires_grad = False
+                    if hasattr(self.pipeline, 'pool_projection_layer'):
+                        for param in self.pipeline.pool_projection_layer.parameters(): param.requires_grad = False
 
-            if not params_to_optimize:
-                self.logger.error("Optimizer params list is empty! Check LoRA flags / config.")
-                continue
+                params_to_optimize = list({id(p): p for p in params_to_optimize}.values())
+                self.logger.info(f"Total unique parameters to optimize: {len(params_to_optimize)}")
 
-            self.optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
+                if not params_to_optimize:
+                    self.logger.error("Optimizer params list is empty! Check LoRA flags / config.")
+                    continue
 
-            self.logger.info(f"Preparing {len(trainable_components)} model components, optimizer, and dataloaders with Accelerator.")
-            prepare_list = trainable_components + [self.optimizer, train_dataloader, val_dataloader]
-            prepared_components = self.accelerator.prepare(*prepare_list)
+                self.optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
 
-            num_models = len(trainable_components)
-            prepared_models_tuple = prepared_components[:num_models]
-            self.optimizer, train_dataloader, val_dataloader = prepared_components[num_models:]
+                self.logger.info(f"Preparing {len(trainable_components)} model components, optimizer, and dataloaders with Accelerator.")
+                prepare_list = trainable_components + [self.optimizer, train_dataloader, val_dataloader]
+                prepared_components = self.accelerator.prepare(*prepare_list)
 
-            for i, original_component in enumerate(trainable_components):
-                prepared_component = prepared_models_tuple[i]
-                if original_component is self.unet:
-                    self.unet = prepared_component
-                    self.pipeline.unet = prepared_component
-                elif original_component is self.refiner_unet:
-                    self.refiner_unet = prepared_component
-                    self.pipeline.refiner_unet = prepared_component
-                elif original_component is self.text_encoder:
-                    self.text_encoder = prepared_component
-                    self.pipeline.text_encoder = prepared_component
-                elif original_component is self.pipeline.projection_layer:
-                    self.pipeline.projection_layer = prepared_component
-                elif original_component is self.pipeline.pool_projection_layer:
-                    self.pipeline.pool_projection_layer = prepared_component
+                num_models = len(trainable_components)
+                prepared_models_tuple = prepared_components[:num_models]
+                self.optimizer, train_dataloader, val_dataloader = prepared_components[num_models:]
 
-            max_train_steps = epochs * math.ceil(len(train_dataloader) / gradient_accumulation_steps)
-            global_step = 0
-            self.logger.info(f"Fold {fold_idx+1}: Total optimization steps = {max_train_steps}")
+                for i, original_component in enumerate(trainable_components):
+                    prepared_component = prepared_models_tuple[i]
+                    if original_component is self.unet:
+                        self.unet = prepared_component
+                        self.pipeline.unet = prepared_component
+                    elif original_component is self.refiner_unet:
+                        self.refiner_unet = prepared_component
+                        self.pipeline.refiner_unet = prepared_component
+                    elif original_component is self.text_encoder:
+                        self.text_encoder = prepared_component
+                        self.pipeline.text_encoder = prepared_component
+                    elif original_component is self.pipeline.projection_layer:
+                        self.pipeline.projection_layer = prepared_component
+                    elif original_component is self.pipeline.pool_projection_layer:
+                        self.pipeline.pool_projection_layer = prepared_component
 
-            for epoch in range(epochs):
-                self.current_epoch = epoch + 1
+                max_train_steps = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
+                global_step = 0
+                self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch}: Total optimization steps = {max_train_steps}")
+
+                # Training loop
                 for model_component in prepared_models_tuple:
                     model_component.train()
 
@@ -751,12 +754,12 @@ class FinetuneModel:
                                 for k,v in added_cond_kwargs.items(): added_cond_kwargs[k] = v.to(dtype=self.dtype)
 
                                 pixel_values_norm = pixel_values * 2.0 - 1.0
-                                pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)  # Ensure valid input range
+                                pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)
                                 with torch.no_grad():
                                     vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
                                     latents = vae_output.latent_dist.sample()
                                     latents = latents * self.pipeline.vae_scale_factor
-                                    latents = torch.clamp(latents, -1e6, 1e6)  # Prevent extreme values
+                                    latents = torch.clamp(latents, -1e6, 1e6)
                                     latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
                                     latents = latents.to(dtype=self.dtype)
                                 if torch.isnan(latents).any() or torch.isinf(latents).any():
@@ -827,55 +830,56 @@ class FinetuneModel:
                 avg_train_loss_epoch = train_loss_epoch / num_train_batches_epoch if num_train_batches_epoch > 0 else float('nan')
                 self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Skipped Opt Steps: {num_skipped_steps}")
 
+                # Validation for the fold
                 if self.accelerator.is_main_process:
                     self.logger.info(f"Running validation for Fold {fold_idx+1}, Epoch {self.current_epoch}...")
                     avg_val_loss = self.validate(val_dataloader, dataset_path)
-                    if not np.isnan(avg_val_loss) and avg_val_loss < self.best_val_loss:
-                        self.best_val_loss = avg_val_loss
-                        self.best_epoch = self.current_epoch
-                        save_dir = os.path.join(self.output_dir, f"fold_{fold_idx+1}_best_model")
-                        self.logger.info(f"*** New best validation loss for Fold {fold_idx+1}: {avg_val_loss:.4f} at Epoch {self.current_epoch} ***")
-                        self.save_model_state(epoch=self.current_epoch, val_loss=avg_val_loss, hyperparameters={
-                            'model_name': self.model_name,
-                            'text_encoder': 't5-base',
-                            'epochs': epochs,
-                            'batch_size': batch_size * self.accelerator.num_processes,
-                            'learning_rate': learning_rate,
-                            'gradient_accumulation_steps': gradient_accumulation_steps,
-                            'lora_r': lora_r,
-                            'lora_alpha': lora_alpha,
-                            'lora_dropout': lora_dropout
-                        }, subdir=save_dir)
-                    else:
-                        self.logger.info(f"Validation loss ({avg_val_loss:.4f}) did not improve from best ({self.best_val_loss:.4f})")
+                    self.fold_val_losses.append(avg_val_loss)
+                    self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch} - Validation Loss: {avg_val_loss:.4f}")
 
                 self.accelerator.wait_for_everyone()
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            self.fold_val_losses.append(self.best_val_loss)
-            if self.accelerator.is_main_process:
-                self.logger.info(f"Fold {fold_idx+1} finished. Best Validation Loss: {self.best_val_loss:.4f} at Epoch {self.best_epoch}")
-                if self.best_val_loss < global_best_avg_val_loss:
-                    global_best_avg_val_loss = self.best_val_loss
-                    global_best_hyperparameters = {
-                        'model_name': self.model_name,
-                        'text_encoder': 't5-base',
-                        'epochs': epochs,
-                        'batch_size': batch_size * self.accelerator.num_processes,
-                        'learning_rate': learning_rate,
-                        'gradient_accumulation_steps': gradient_accumulation_steps,
-                        'lora_r': lora_r,
-                        'lora_alpha': lora_alpha,
-                        'lora_dropout': lora_dropout
+                # Save model state at the end of the fold to restore later if needed
+                if self.accelerator.is_main_process and checkpoint_state is None:
+                    checkpoint_state = {
+                        'unet': self.unet.state_dict() if isinstance(self.unet, PeftModel) else None,
+                        'refiner_unet': self.refiner_unet.state_dict() if self.refiner_unet and isinstance(self.refiner_unet, PeftModel) else None,
+                        'text_encoder': self.text_encoder.state_dict() if isinstance(self.text_encoder, PeftModel) else None,
+                        'projection_layer': self.pipeline.projection_layer.state_dict() if hasattr(self.pipeline, 'projection_layer') and self._apply_lora_text_flag else None,
+                        'pool_projection_layer': self.pipeline.pool_projection_layer.state_dict() if hasattr(self.pipeline, 'pool_projection_layer') and self._apply_lora_text_flag else None,
                     }
-                    global_best_epoch = self.best_epoch
 
-        valid_losses = [loss for loss in self.fold_val_losses if loss != float('inf') and not np.isnan(loss)]
-        avg_kfold_val_loss = np.mean(valid_losses) if valid_losses else float('inf')
-        self.logger.info(f"K-Fold Training Finished - Avg Best Validation Loss across {len(valid_losses)} valid folds: {avg_kfold_val_loss:.4f}")
+            # Compute average validation loss across all folds for this epoch
+            valid_losses = [loss for loss in self.fold_val_losses if loss != float('inf') and not np.isnan(loss)]
+            avg_kfold_val_loss = np.mean(valid_losses) if valid_losses else float('inf')
+            self.logger.info(f"Epoch {self.current_epoch} - Average K-Fold Validation Loss: {avg_kfold_val_loss:.4f}")
 
-        return avg_kfold_val_loss, None, global_best_hyperparameters, global_best_epoch
+            # Save model if average loss is the best so far
+            if self.accelerator.is_main_process and not np.isnan(avg_kfold_val_loss) and avg_kfold_val_loss < best_avg_kfold_val_loss:
+                best_avg_kfold_val_loss = avg_kfold_val_loss
+                best_epoch = self.current_epoch
+                best_hyperparameters = {
+                    'model_name': self.model_name,
+                    'text_encoder': 't5-base',
+                    'epochs': epochs,
+                    'batch_size': batch_size * self.accelerator.num_processes,
+                    'learning_rate': learning_rate,
+                    'gradient_accumulation_steps': gradient_accumulation_steps,
+                    'lora_r': lora_r,
+                    'lora_alpha': lora_alpha,
+                    'lora_dropout': lora_dropout
+                }
+                save_dir = os.path.join(self.output_dir, f"best_model_epoch_{self.current_epoch}")
+                self.logger.info(f"*** New best average K-Fold validation loss: {avg_kfold_val_loss:.4f} at Epoch {self.current_epoch} ***")
+                self.save_model_state(epoch=self.current_epoch, val_loss=avg_kfold_val_loss, hyperparameters=best_hyperparameters, subdir=save_dir)
+
+            fold_val_losses_per_epoch.append(self.fold_val_losses)
+
+        # Return the best average loss and hyperparameters
+        self.logger.info(f"K-Fold Training Finished - Best Avg K-Fold Validation Loss: {best_avg_kfold_val_loss:.4f} at Epoch {best_epoch}")
+        return best_avg_kfold_val_loss, None, best_hyperparameters, best_epoch
 
 # --- Main Execution ---
 def run_finetune(config_path):
@@ -886,8 +890,8 @@ def run_finetune(config_path):
 
     gradient_accumulation_steps = config.get("gradient_accumulation_steps", 8)
     mixed_precision = config.get("mixed_precision", 'fp16')
-    output_dir = config.get("base_output_dir", "./output")
-    project_dir = os.path.join(output_dir, "logs")
+    base_output_dir = config.get("base_output_dir_sdxl", "/home/iris/Documents/deep_learning/experiments/sdxl_t5_refiner")
+    project_dir = os.path.join(base_output_dir, "logs")
 
     if not os.path.exists(project_dir):
         os.makedirs(project_dir, exist_ok=True)
@@ -947,7 +951,6 @@ def run_finetune(config_path):
             logger.error(f"Failed to create K-Fold splits: {e}\n{traceback.format_exc()}")
             return
 
-    base_output_dir = config.get("base_output_dir_sdxl", "/home/iris/Documents/deep_learning/experiments/sdxl_t5_refiner")
     if accelerator.is_main_process:
         os.makedirs(base_output_dir, exist_ok=True)
         logger.info(f"Base output directory: {base_output_dir}")
@@ -1062,7 +1065,7 @@ def run_finetune(config_path):
                 logger.info(f"  Config Name: {best_performing_config_info['config_name']}")
                 logger.info(f"  Avg K-Fold Val Loss: {best_performing_config_info['avg_kfold_val_loss']:.4f}")
                 logger.info(f"  Hyperparameters: {best_performing_config_info['hyperparameters']}")
-                logger.info(f"  Best model weights saved within fold directories inside: {os.path.join(base_output_dir, best_performing_config_info['config_name'])}")
+                logger.info(f"  Best model weights saved in: {os.path.join(base_output_dir, best_performing_config_info['config_name'])}")
             else:
                 logger.warning("No configuration completed successfully or achieved a valid validation loss.")
         except Exception as e:
