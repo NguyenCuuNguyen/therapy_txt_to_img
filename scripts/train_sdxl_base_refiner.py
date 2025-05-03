@@ -7,6 +7,7 @@ import numpy as np
 import json
 import math
 import gc
+import warnings
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 import torch.nn.functional as F
@@ -21,13 +22,20 @@ from transformers import T5EncoderModel, T5Tokenizer
 from diffusers.utils import BaseOutput
 from diffusers.configuration_utils import FrozenDict
 from peft import LoraConfig, get_peft_model, PeftModel
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import train_test_split
 from PIL import Image
+import shutil
+
+# Suppress FutureWarning from diffusers (if applicable)
+warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers.models.transformers.transformer_2d")
+
 try:
     from bitsandbytes.optim import AdamW8bit
 except ImportError:
     print("Warning: bitsandbytes not found. Using torch.optim.AdamW.")
     AdamW8bit = torch.optim.AdamW
+
 try:
     from src.utils.dataset import load_dataset, CocoFinetuneDataset
 except ImportError:
@@ -80,21 +88,28 @@ def load_hyperparam_config(hyperparam_config_path, logger):
             print("Error: No valid configuration found in hyperparameter performance summary.")
             return None
         default_hyperparams = {
-            "learning_rate": 5e-08,
+            "learning_rate": 1e-7,
             "lora_r": 8,
             "apply_lora_unet": True,
             "apply_lora_refiner": True,
-            "apply_lora_text_encoder": False,
-            "epochs": 5,
+            "apply_lora_text_encoder": True,
+            "epochs": 20,
             "batch_size": 1,
             "lora_alpha": 16,
-            "lora_dropout": 0.1
+            "lora_dropout": 0.1,
+            "validation_split": 0.2,
+            "early_stopping_patience": 5,
+            "generation_frequency": 1,
+            "perceptual_loss_weight": 0.1
         }
         hyperparameters = best_config.get("hyperparameters", {})
         for key, value in default_hyperparams.items():
             if key not in hyperparameters:
                 logger.warning(f"Missing hyperparameter '{key}' in best config. Using default: {value}")
                 hyperparameters[key] = value
+        if hyperparameters.get("apply_lora_text_encoder") is False:
+            logger.warning("apply_lora_text_encoder is False in config, overriding to True to train projection layers.")
+            hyperparameters["apply_lora_text_encoder"] = True
         hyperparam_config = {
             "config_idx": best_config.get("config_idx", 0),
             "config_name": best_config.get("config_name", "hyperparam_config_0"),
@@ -147,7 +162,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         )
 
         self.pipeline_config = {
-            "image_size": 1024,
+            "image_size": 512,
             "t5_hidden_size": 768,
             "unet_cross_attn_dim": 2048,
             "base_pooled_embed_dim": 1280,
@@ -176,7 +191,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         if projection_layer is None:
             self.logger.info(f"Initializing Projection Layer T5({t5_hidden_size}) -> SDXL UNet({unet_cross_attn_dim})")
             self.projection_layer = torch.nn.Linear(t5_hidden_size, unet_cross_attn_dim)
-            torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.01)
+            torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.001)
             torch.nn.init.zeros_(self.projection_layer.bias)
         else:
             self.projection_layer = projection_layer
@@ -184,7 +199,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         if pool_projection_layer is None:
             self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL Base AddEmbs({base_pooled_embed_dim})")
             self.pool_projection_layer = torch.nn.Linear(t5_hidden_size, base_pooled_embed_dim)
-            torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.01)
+            torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.001)
             torch.nn.init.zeros_(self.pool_projection_layer.bias)
         else:
             self.pool_projection_layer = pool_projection_layer
@@ -193,11 +208,10 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             if refiner_pool_projection_layer is None:
                 self.logger.info(f"Initializing Refiner Pool Projection Layer T5({t5_hidden_size}) -> SDXL Refiner AddEmbs({refiner_pooled_embed_dim})")
                 self.refiner_pool_projection_layer = torch.nn.Linear(t5_hidden_size, refiner_pooled_embed_dim)
-                torch.nn.init.normal_(self.refiner_pool_projection_layer.weight, mean=0.0, std=0.01)
+                torch.nn.init.normal_(self.refiner_pool_projection_layer.weight, mean=0.0, std=0.001)
                 torch.nn.init.zeros_(self.refiner_pool_projection_layer.bias)
             else:
                 self.refiner_pool_projection_layer = refiner_pool_projection_layer
-            # Validate refiner_pool_projection_layer dimensions
             if self.refiner_pool_projection_layer.out_features != refiner_pooled_embed_dim:
                 raise ValueError(f"refiner_pool_projection_layer output dimension {self.refiner_pool_projection_layer.out_features} does not match expected {refiner_pooled_embed_dim}")
         else:
@@ -210,9 +224,6 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             self.logger.warning(f"Could not determine vae_scale_factor, using default: {self.vae_scale_factor}")
 
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
-        """
-        Prepares latent representations for the diffusion process.
-        """
         shape = (
             batch_size,
             num_channels_latents,
@@ -234,13 +245,10 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
 
         latents = latents * self.scheduler.init_noise_sigma
         latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
-        self.logger.debug(f"Prepared latents with shape: {latents.shape}, device: {latents.device}, dtype: {latents.dtype}")
+        self.logger.debug(f"Prepared latents with shape: {latents.shape}, device: {latents.device}, dtype: {latents.dtype}, mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}")
         return latents
 
     def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=None):
-        """
-        Encodes the prompt using T5 and projects it to UNet-compatible embeddings for both base and refiner UNets.
-        """
         batch_size = len(prompt) if isinstance(prompt, list) else 1
         if isinstance(prompt, str): prompt = [prompt]
 
@@ -261,18 +269,20 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 attention_mask=attention_mask.to(device)
             )[0]
         encoder_hidden_states_t5 = torch.nan_to_num(encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.logger.debug(f"T5 hidden states - mean: {encoder_hidden_states_t5.mean().item():.4f}, std: {encoder_hidden_states_t5.std().item():.4f}")
 
         if not hasattr(self, 'projection_layer') or self.projection_layer is None:
             raise AttributeError("projection_layer is required.")
         prompt_embeds = self.projection_layer(encoder_hidden_states_t5.to(dtype=self.projection_layer.weight.dtype))
         prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.logger.debug(f"Prompt embeds after projection - mean: {prompt_embeds.mean().item():.4f}, std: {prompt_embeds.std().item():.4f}")
 
         pooled_output_t5 = encoder_hidden_states_t5.mean(dim=1)
         if not hasattr(self, 'pool_projection_layer') or self.pool_projection_layer is None:
             raise AttributeError("pool_projection_layer is required.")
         base_text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
         base_text_embeds = torch.nan_to_num(base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
-        self.logger.debug(f"Base text_embeds shape: {base_text_embeds.shape}")
+        self.logger.debug(f"Base text_embeds shape: {base_text_embeds.shape}, mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}")
 
         refiner_text_embeds = None
         if self.refiner_unet is not None and self.refiner_pool_projection_layer is not None:
@@ -281,11 +291,11 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             expected_refiner_dim = self.pipeline_config["refiner_pooled_embed_dim"]
             if refiner_text_embeds.shape[-1] != expected_refiner_dim:
                 raise ValueError(f"refiner_text_embeds dimension {refiner_text_embeds.shape[-1]} does not match expected {expected_refiner_dim}")
-            self.logger.debug(f"Refiner text_embeds shape: {refiner_text_embeds.shape}")
+            self.logger.debug(f"Refiner text_embeds shape: {refiner_text_embeds.shape}, mean: {refiner_text_embeds.mean().item():.4f}, std: {refiner_text_embeds.std().item():.4f}")
         else:
             self.logger.debug("No refiner UNet or refiner_pool_projection_layer; using base text_embeds only.")
 
-        image_size = self.pipeline_config.get("image_size", 1024)
+        image_size = self.pipeline_config.get("image_size", 512)
         original_size = (image_size, image_size)
         crops_coords_top_left = (0, 0)
         target_size = (image_size, image_size)
@@ -338,15 +348,12 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         return prompt_embeds, added_cond_kwargs
 
     @torch.no_grad()
-    def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, num_images_per_prompt=1, generator=None, output_type="pil", refiner_steps=10, height=None, width=None, latents=None, return_dict=True, **kwargs):
-        """
-        Generates images using base and optional refiner UNets.
-        """
+    def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, num_images_per_prompt=1, generator=None, output_type="pil", refiner_steps=10, height=None, width=None, latents=None, return_dict=True, debug_dir=None, **kwargs):
         device = self.device
         dtype = self.unet.dtype if hasattr(self.unet, 'dtype') else torch.float32
 
-        height = height or self.pipeline_config.get("image_size", 1024)
-        width = width or self.pipeline_config.get("image_size", 1024)
+        height = height or self.pipeline_config.get("image_size", 512)
+        width = width or self.pipeline_config.get("image_size", 512)
 
         batch_size = len(prompt) if isinstance(prompt, list) else 1
         do_classifier_free_guidance = guidance_scale > 1.0
@@ -387,14 +394,30 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                     added_cond_kwargs={"text_embeds": added_cond_kwargs["text_embeds"], "time_ids": added_cond_kwargs["time_ids"]}
                 ).sample
 
+                if torch.isnan(noise_pred).any() or torch.isinf(noise_pred).any():
+                    self.logger.warning(f"Step {i+1}: NaN/Inf in noise_pred. Skipping update.")
+                    continue
+
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+                if torch.isnan(latents).any() or torch.isinf(latents).any():
+                    self.logger.warning(f"Step {i+1}: NaN/Inf in latents after update. Resetting latents.")
+                    latents = torch.zeros_like(latents)
+
+                if debug_dir and i % 10 == 0:
+                    latents_np = latents.cpu().numpy()
+                    latents_path = os.path.join(debug_dir, f"latents_step_{i}.npy")
+                    np.save(latents_path, latents_np)
+                    self.logger.info(f"Saved latents at step {i} to {latents_path}, mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}")
 
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
+
+                gc.collect()
+                torch.cuda.empty_cache()
 
         if self.refiner_unet is not None and refiner_steps > 0:
             self.logger.info("Running refiner UNet for additional denoising steps.")
@@ -412,25 +435,45 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                         added_cond_kwargs={"text_embeds": added_cond_kwargs["refiner_text_embeds"], "time_ids": added_cond_kwargs["time_ids"]}
                     ).sample
 
+                    if torch.isnan(noise_pred).any() or torch.isinf(noise_pred).any():
+                        self.logger.warning(f"Refiner Step {i+1}: NaN/Inf in noise_pred. Skipping update.")
+                        continue
+
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                     latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                        self.logger.warning(f"Refiner Step {i+1}: NaN/Inf in latents after update. Resetting latents.")
+                        latents = torch.zeros_like(latents)
 
                     if i == len(refiner_timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                         progress_bar.update()
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
         image = latents
         if output_type != "latent":
             self.vae.to(dtype=torch.float32)
             latents = latents.to(dtype=torch.float32)
+            self.logger.info(f"Latents before VAE decode - mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}, min: {latents.min().item():.4f}, max: {latents.max().item():.4f}")
             latents = latents / self.vae_scale_factor
             self.vae.to(device=latents.device)
             with torch.no_grad():
                 image = self.vae.decode(latents).sample
+            self.logger.info(f"Decoded image - mean: {image.mean().item():.4f}, std: {image.std().item():.4f}, min: {image.min().item():.4f}, max: {image.max().item():.4f}")
+            if debug_dir:
+                image_np = image.cpu().numpy()
+                image_path = os.path.join(debug_dir, "decoded_image.npy")
+                np.save(image_path, image_np)
+                self.logger.info(f"Saved decoded image to {image_path}")
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if output_type == "pil":
             image = self.numpy_to_pil(image)
@@ -463,12 +506,16 @@ class FinetuneModel:
         self.scheduler = None
         self.vae = None
         self.pipeline = None
-        self.image_size = 1024
+        self.image_size = 512
         self.current_epoch = 0
         self._apply_lora_unet_flag = False
         self._apply_lora_refiner_flag = False
         self._apply_lora_text_flag = False
         self.optimizer = None
+        self.best_val_loss = float('inf')
+        self.epochs_no_improve = 0
+        self.perceptual_loss_fn = None
+        self.logger.info("Perceptual loss disabled to reduce memory usage.")
 
     def load_model(self):
         try:
@@ -478,20 +525,38 @@ class FinetuneModel:
 
             self.logger.info("Loading tokenizer...")
             self.tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
+            gc.collect()
+            torch.cuda.empty_cache()
+
             self.logger.info("Loading text encoder...")
-            self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name)
+            self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name).to(self.device, dtype=self.dtype)
+            gc.collect()
+            torch.cuda.empty_cache()
+
             self.logger.info("Loading VAE...")
-            self.vae = AutoencoderKL.from_pretrained(base_model_id, subfolder="vae")
+            self.vae = AutoencoderKL.from_pretrained(base_model_id, subfolder="vae").to(self.device, dtype=torch.float32)
+            self.vae.eval()
+            gc.collect()
+            torch.cuda.empty_cache()
+
             self.logger.info("Loading UNet...")
-            self.unet = UNet2DConditionModel.from_pretrained(base_model_id, subfolder="unet")
+            self.unet = UNet2DConditionModel.from_pretrained(base_model_id, subfolder="unet").to(self.device, dtype=self.dtype)
+            gc.collect()
+            torch.cuda.empty_cache()
+
             self.logger.info("Loading Refiner UNet...")
-            self.refiner_unet = UNet2DConditionModel.from_pretrained(refiner_model_id, subfolder="unet")
+            self.refiner_unet = UNet2DConditionModel.from_pretrained(refiner_model_id, subfolder="unet").to(self.device, dtype=self.dtype)
+            gc.collect()
+            torch.cuda.empty_cache()
+
             self.logger.info("Loading scheduler...")
             self.scheduler = DPMSolverMultistepScheduler.from_pretrained(base_model_id, subfolder="scheduler")
+            gc.collect()
+            torch.cuda.empty_cache()
 
             self.logger.info("Attempting to enable gradient checkpointing...")
             try:
-                self.text_encoder.gradient_checkpointing = True
+                self.text_encoder.gradient_checkpointing_enable()
                 self.logger.info("Enabled gradient checkpointing for T5 Text Encoder.")
             except AttributeError:
                 self.logger.warning("Could not enable gradient checkpointing for T5.")
@@ -518,10 +583,6 @@ class FinetuneModel:
             )
 
             self.logger.info(f"Moving models to target device: {self.device} and dtype: {self.dtype}")
-            self.vae.to(self.device, dtype=torch.float32)
-            self.vae.eval()
-            self.pipeline.to(self.device, dtype=self.dtype)
-
             if hasattr(self.pipeline, 'projection_layer') and self.pipeline.projection_layer is not None:
                 self.pipeline.projection_layer.to(self.device, dtype=self.dtype)
                 self.logger.info("Moved projection_layer to device and dtype.")
@@ -543,6 +604,9 @@ class FinetuneModel:
         except Exception as e:
             self.logger.error(f"Failed to load model components: {e}\n{traceback.format_exc()}")
             raise
+        finally:
+            gc.collect()
+            torch.cuda.empty_cache()
 
     def modify_architecture(self, apply_lora_unet=True, apply_lora_refiner=True, apply_lora_text_encoder=False, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self._apply_lora_unet_flag = apply_lora_unet
@@ -558,12 +622,16 @@ class FinetuneModel:
             self.unet = get_peft_model(self.unet, lora_config_unet)
             self.pipeline.unet = self.unet
             self.unet.print_trainable_parameters()
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if apply_lora_refiner and self.refiner_unet:
             self.logger.info("Applying LoRA to refiner UNet...")
             self.refiner_unet = get_peft_model(self.refiner_unet, lora_config_unet)
             self.pipeline.refiner_unet = self.refiner_unet
             self.refiner_unet.print_trainable_parameters()
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if apply_lora_text_encoder and self.text_encoder:
             self.logger.info("Applying LoRA to T5 text encoder...")
@@ -584,14 +652,20 @@ class FinetuneModel:
                 self.logger.info("Setting refiner pool projection layer requires_grad=True")
                 for param in self.pipeline.refiner_pool_projection_layer.parameters():
                     param.requires_grad = True
+            gc.collect()
+            torch.cuda.empty_cache()
 
-    def save_model_state(self, epoch=None, train_loss=None, hyperparameters=None, subdir=None):
+    def save_model_state(self, epoch=None, train_loss=None, val_loss=None, hyperparameters=None, subdir=None, is_best=False):
         if not self.accelerator.is_main_process:
             return
         output_subdir = subdir if subdir else self.output_dir
         os.makedirs(output_subdir, exist_ok=True)
         train_loss_str = f"{train_loss:.4f}" if train_loss is not None and not np.isnan(train_loss) else "N/A"
-        save_label = f"final_model_epoch_{epoch}_loss_{train_loss_str}"
+        val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) else "N/A"
+        if is_best:
+            save_label = f"best_model_epoch_{epoch}_train_loss_{train_loss_str}_val_loss_{val_loss_str}"
+        else:
+            save_label = f"epoch_{epoch}_train_loss_{train_loss_str}_val_loss_{val_loss_str}"
         save_paths = {}
 
         if isinstance(self.unet, PeftModel):
@@ -656,7 +730,7 @@ class FinetuneModel:
                     '_apply_lora_refiner': self._apply_lora_refiner_flag
                 })
                 hyperparam_path = os.path.join(output_subdir, f"{save_label}_hyperparameters.json")
-                save_data = {'model_name': self.model_name, 'epoch': epoch, 'train_loss': train_loss_str, 'hyperparameters': hyperparameters}
+                save_data = {'model_name': self.model_name, 'epoch': epoch, 'train_loss': train_loss_str, 'val_loss': val_loss_str, 'hyperparameters': hyperparameters}
                 with open(hyperparam_path, 'w') as f:
                     json.dump(save_data, f, indent=4)
                 self.logger.info(f"Saved hyperparameters to {hyperparam_path}")
@@ -668,14 +742,181 @@ class FinetuneModel:
         else:
             self.logger.info(f"Saved model components for epoch {epoch}: {save_paths}")
 
-    def fine_tune(self, dataset_path, dataset, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8, lora_r=8, lora_alpha=16, lora_dropout=0.1):
+    def generate_validation_images(self, prompts, output_dir, epoch, use_pretrained=False):
+        if not self.accelerator.is_main_process:
+            return
+        os.makedirs(output_dir, exist_ok=True)
+        debug_dir = os.path.join(output_dir, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        self.logger.info(f"Generating validation images for epoch {epoch} (use_pretrained={use_pretrained})...")
+
+        original_unet = self.pipeline.unet
+        if use_pretrained:
+            self.logger.info("Loading pre-trained UNet for validation image generation...")
+            base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+            self.pipeline.unet = UNet2DConditionModel.from_pretrained(base_model_id, subfolder="unet").to(self.device, dtype=self.dtype)
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        for idx, prompt in enumerate(prompts[:3]):
+            try:
+                generator = torch.Generator(device=self.device).manual_seed(42 + idx)
+                with torch.no_grad():
+                    image = self.pipeline(
+                        prompt=prompt,
+                        negative_prompt="blurry, low quality, distorted",
+                        num_inference_steps=50,
+                        guidance_scale=7.5,
+                        refiner_steps=0,
+                        height=self.image_size,
+                        width=self.image_size,
+                        generator=generator,
+                        output_type="pil",
+                        debug_dir=debug_dir
+                    ).images[0]
+                suffix = "pretrained" if use_pretrained else "finetuned"
+                output_path = os.path.join(output_dir, f"val_image_epoch_{epoch}_prompt_{idx}_{suffix}.png")
+                image.save(output_path)
+                self.logger.info(f"Saved validation image: {output_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to generate validation image for prompt {idx}: {e}")
+            finally:
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        if use_pretrained:
+            self.pipeline.unet = original_unet
+            self.logger.info("Restored fine-tuned UNet after validation image generation.")
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    def validate(self, val_dataloader, image_folder, perceptual_loss_weight=0.1):
+        self.logger.info("Running validation...")
+        val_loss = 0.0
+        num_val_batches = 0
+
+        for model_component in [self.unet, self.refiner_unet, self.text_encoder]:
+            if model_component:
+                model_component.eval()
+
+        for batch in val_dataloader:
+            try:
+                image_filenames = batch.get('image')
+                prompts = batch.get('prompt')
+                if image_filenames is None or prompts is None:
+                    self.logger.warning("Validation batch missing 'image' or 'prompt'. Skipping.")
+                    continue
+
+                pixel_values_list = []
+                valid_prompts = []
+                for img_filename, prompt in zip(image_filenames, prompts):
+                    if not isinstance(prompt, str) or not prompt.strip():
+                        self.logger.warning(f"Validation: Invalid or empty prompt for image {img_filename}. Skipping item.")
+                        continue
+                    try:
+                        image_path = os.path.join(image_folder, img_filename)
+                        image = Image.open(image_path).convert('RGB').resize((self.image_size, self.image_size))
+                        image_np = np.array(image).astype(np.float32) / 255.0
+                        if np.any(np.isnan(image_np)) or np.any(np.isinf(image_np)):
+                            self.logger.warning(f"Validation: NaN/Inf in image {img_filename}. Skipping item.")
+                            continue
+                        image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
+                        pixel_values_list.append(image_tensor)
+                        valid_prompts.append(prompt)
+                    except FileNotFoundError:
+                        self.logger.warning(f"Validation: Image file not found {image_path}. Skipping item.")
+                    except Exception as img_err:
+                        self.logger.warning(f"Validation: Error loading image {img_filename}: {img_err}. Skipping item.")
+
+                if not pixel_values_list:
+                    self.logger.debug("Skipping validation batch: No valid image/prompt pairs.")
+                    continue
+
+                pixel_values = torch.stack(pixel_values_list).to(self.device, dtype=torch.float32)
+                prompts = valid_prompts
+
+                with torch.no_grad():
+                    prompt_embeds, added_cond_kwargs = self.pipeline._encode_prompt(
+                        prompts, self.device, 1, False
+                    )
+                    prompt_embeds = prompt_embeds.to(self.dtype)
+                    for k, v in added_cond_kwargs.items():
+                        added_cond_kwargs[k] = v.to(self.dtype)
+
+                    pixel_values_norm = pixel_values * 2.0 - 1.0
+                    pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)
+                    vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
+                    latents = vae_output.latent_dist.sample()
+                    latents = latents * self.pipeline.vae_scale_factor
+                    latents = torch.clamp(latents, -1e6, 1e6)
+                    latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
+                    latents = latents.to(self.dtype)
+
+                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                        self.logger.warning("Validation: NaN/Inf in latents after clamping. Skipping batch.")
+                        continue
+
+                    noise = torch.randn_like(latents)
+                    timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
+                    noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+                    noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
+
+                    model_pred = self.unet(
+                        sample=noisy_latents,
+                        timestep=timesteps,
+                        encoder_hidden_states=prompt_embeds,
+                        added_cond_kwargs=added_cond_kwargs
+                    ).sample
+                    if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
+                        self.logger.warning("Validation: NaN/Inf in model_pred. Skipping batch.")
+                        continue
+                    model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
+
+                    mse_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+                    if torch.isnan(mse_loss) or torch.isinf(mse_loss):
+                        self.logger.warning("Validation: MSE loss is NaN/Inf. Skipping batch.")
+                        continue
+
+                    total_loss = mse_loss
+
+                    avg_loss = self.accelerator.gather(total_loss.repeat(latents.shape[0])).mean()
+                    val_loss += avg_loss.item()
+                    num_val_batches += 1
+
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            except Exception as e:
+                self.logger.error(f"Validation step failed: {e}\n{traceback.format_exc()}")
+                continue
+
+        for model_component in [self.unet, self.refiner_unet, self.text_encoder]:
+            if model_component:
+                model_component.train()
+
+        if num_val_batches == 0:
+            self.logger.warning("No valid validation batches processed. Returning infinity for validation loss.")
+            return float('inf')
+        avg_val_loss = val_loss / num_val_batches
+        self.logger.info(f"Validation Loss: {avg_val_loss:.4f}")
+        return avg_val_loss
+
+    def fine_tune(self, dataset_path, dataset, epochs=1, batch_size=1, learning_rate=1e-7, gradient_accumulation_steps=4, lora_r=8, lora_alpha=16, lora_dropout=0.1, validation_split=0.2, early_stopping_patience=2, generation_frequency=1, perceptual_loss_weight=0.1):
         self.logger.info(f"Requested learning rate: {learning_rate}")
-        if learning_rate > 5e-8:
-            self.logger.warning(f"Capping learning rate at 5e-8 for stability.")
-            learning_rate = 5e-8
+        if learning_rate > 1e-8:
+            self.logger.warning(f"Capping learning rate at 1e-8 for stability.")
+            learning_rate = 1e-8
 
         try:
-            train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+            dataset_size = len(dataset)
+            indices = list(range(dataset_size))
+            train_indices, val_indices = train_test_split(indices, test_size=validation_split, random_state=42)
+            train_dataset = Subset(dataset, train_indices)
+            val_dataset = Subset(dataset, val_indices)
+            self.logger.info(f"Dataset split: {len(train_dataset)} training samples, {len(val_dataset)} validation samples")
+
+            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
             image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
 
             params_to_optimize = []
@@ -691,6 +932,7 @@ class FinetuneModel:
 
             if self._apply_lora_refiner_flag and self.refiner_unet is not None:
                 params_to_optimize.extend(p for p in self.refiner_unet.parameters() if p.requires_grad)
+                trainable_components.append(self.refiner_unet)
                 self.logger.info("Adding Refiner UNet LoRA parameters.")
 
             if self._apply_lora_text_flag:
@@ -744,13 +986,13 @@ class FinetuneModel:
 
             self.optimizer = AdamW8bit(params_to_optimize, lr=learning_rate)
 
-            self.logger.info(f"Preparing {len(trainable_components)} model components, optimizer, and dataloader with Accelerator.")
-            prepare_list = trainable_components + [self.optimizer, train_dataloader]
+            self.logger.info(f"Preparing {len(trainable_components)} model components, optimizer, and dataloaders with Accelerator.")
+            prepare_list = trainable_components + [self.optimizer, train_dataloader, val_dataloader]
             prepared_components = self.accelerator.prepare(*prepare_list)
 
             num_models = len(trainable_components)
             prepared_models_tuple = prepared_components[:num_models]
-            self.optimizer, train_dataloader = prepared_components[num_models:]
+            self.optimizer, train_dataloader, val_dataloader = prepared_components[num_models:]
 
             for i, original_component in enumerate(trainable_components):
                 prepared_component = prepared_models_tuple[i]
@@ -771,8 +1013,15 @@ class FinetuneModel:
                     self.pipeline.refiner_pool_projection_layer = prepared_component
 
             final_train_loss = float('inf')
+            final_val_loss = float('inf')
             final_epoch = -1
             final_hyperparameters = None
+
+            validation_prompts = [
+                "A serene landscape with mountains and a river, sharp focus, highly detailed, 8k",
+                "A futuristic cityscape at night with neon lights, intricate details, high resolution",
+                "A cozy cabin in a snowy forest, clear, masterpiece, 8k"
+            ]
 
             for epoch in range(epochs):
                 self.current_epoch = epoch + 1
@@ -820,17 +1069,34 @@ class FinetuneModel:
                             self.logger.debug(f"Skipping train batch {step+1}: No valid image/prompt pairs.")
                             continue
 
-                        pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device, dtype=torch.float32)
+                        pixel_values = torch.stack(pixel_values_list).to(self.device, dtype=torch.float32)
                         prompts = valid_prompts
 
                         with self.accelerator.accumulate(*prepared_models_tuple):
-                            with torch.amp.autocast(device_type='cuda', enabled=self.accelerator.mixed_precision == 'fp16'):
+                            with torch.amp.autocast(device_type='cuda', enabled=self.accelerator.mixed_precision in ['fp16', 'bf16']):
                                 prompt_embeds, added_cond_kwargs = self.pipeline._encode_prompt(
-                                    prompts, self.accelerator.device, 1, False
+                                    prompts, self.device, 1, False
                                 )
-                                prompt_embeds = prompt_embeds.to(dtype=self.dtype)
+                                prompt_embeds = prompt_embeds.to(self.dtype)
                                 for k, v in added_cond_kwargs.items():
-                                    added_cond_kwargs[k] = v.to(dtype=self.dtype)
+                                    added_cond_kwargs[k] = v.to(self.dtype)
+
+                                if torch.isnan(prompt_embeds).any() or torch.isinf(prompt_embeds).any():
+                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in prompt_embeds. Skipping.")
+                                    self.optimizer.zero_grad()
+                                    continue
+                                if torch.isnan(added_cond_kwargs["text_embeds"]).any() or torch.isinf(added_cond_kwargs["text_embeds"]).any():
+                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in added_cond_kwargs['text_embeds']. Skipping.")
+                                    self.optimizer.zero_grad()
+                                    continue
+
+                                embed_reg_loss = 1e-4 * torch.norm(prompt_embeds, p=2)
+                                embed_reg_loss += 1e-4 * torch.norm(added_cond_kwargs["text_embeds"], p=2)
+
+                                if torch.isnan(embed_reg_loss) or torch.isinf(embed_reg_loss):
+                                    self.logger.warning(f"Train Step {step+1}: NaN/Inf in embed_reg_loss. Skipping.")
+                                    self.optimizer.zero_grad()
+                                    continue
 
                                 pixel_values_norm = pixel_values * 2.0 - 1.0
                                 pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)
@@ -840,7 +1106,7 @@ class FinetuneModel:
                                     latents = latents * self.pipeline.vae_scale_factor
                                     latents = torch.clamp(latents, -1e6, 1e6)
                                     latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
-                                    latents = latents.to(dtype=self.dtype)
+                                    latents = latents.to(self.dtype)
                                 if torch.isnan(latents).any() or torch.isinf(latents).any():
                                     self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after clamping. Skipping.")
                                     self.optimizer.zero_grad()
@@ -863,15 +1129,15 @@ class FinetuneModel:
                                     continue
                                 model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
 
-                                base_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
-                                loss = base_loss
-
-                                if torch.isnan(loss) or torch.isinf(loss):
-                                    self.logger.warning(f"Train Step {step+1}: Calculated loss is NaN/Inf. Skipping.")
+                                mse_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+                                if torch.isnan(mse_loss) or torch.isinf(mse_loss):
+                                    self.logger.warning(f"Train Step {step+1}: MSE loss is NaN/Inf. Skipping.")
                                     self.optimizer.zero_grad()
                                     continue
 
-                            self.accelerator.backward(loss)
+                                total_loss = mse_loss + embed_reg_loss
+
+                            self.accelerator.backward(total_loss)
 
                             if self.accelerator.sync_gradients:
                                 valid_gradients = True
@@ -880,6 +1146,8 @@ class FinetuneModel:
                                     if torch.isnan(grad_norm) or torch.isinf(grad_norm):
                                         self.logger.warning(f"Train Step {step+1}: NaN/Inf gradient norm ({grad_norm.item()}). Skipping step.")
                                         valid_gradients = False
+                                    else:
+                                        self.logger.debug(f"Train Step {step+1}: Gradient norm before clipping: {grad_norm.item():.4f}")
                                 except Exception as clip_err:
                                     self.logger.warning(f"Train Step {step+1}: Error during gradient clipping: {clip_err}. Skipping step.")
                                     valid_gradients = False
@@ -892,12 +1160,15 @@ class FinetuneModel:
                                     num_skipped_steps += 1
                                 global_step += 1
 
-                            avg_loss = self.accelerator.gather(loss.repeat(latents.shape[0])).mean()
+                            avg_loss = self.accelerator.gather(total_loss.repeat(latents.shape[0])).mean()
                             train_loss_epoch += avg_loss.item()
                             num_train_batches_epoch += 1
 
                             if self.accelerator.is_main_process and (global_step % 50 == 0 or step == len(train_dataloader) - 1):
                                 self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {avg_loss.item():.4f}")
+
+                        gc.collect()
+                        torch.cuda.empty_cache()
 
                     except Exception as e:
                         self.logger.error(f"Training step {step+1} failed: {e}\n{traceback.format_exc()}")
@@ -911,7 +1182,73 @@ class FinetuneModel:
                 avg_train_loss_epoch = train_loss_epoch / num_train_batches_epoch if num_train_batches_epoch > 0 else float('nan')
                 self.logger.info(f"Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Skipped Opt Steps: {num_skipped_steps}")
 
+                val_loss = self.validate(val_dataloader, image_folder, perceptual_loss_weight)
+
+                if self.current_epoch % generation_frequency == 0:
+                    val_image_dir = os.path.join(self.output_dir, f"val_images_epoch_{self.current_epoch}")
+                    self.generate_validation_images(validation_prompts, val_image_dir, self.current_epoch, use_pretrained=False)
+                    self.generate_validation_images(validation_prompts, val_image_dir, self.current_epoch, use_pretrained=True)
+
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.epochs_no_improve = 0
+                    save_dir = os.path.join(self.output_dir, "best_model")
+                    self.logger.info(f"New best validation loss: {val_loss:.4f}. Saving best model...")
+                    self.save_model_state(
+                        epoch=self.current_epoch,
+                        train_loss=avg_train_loss_epoch,
+                        val_loss=val_loss,
+                        hyperparameters={
+                            'model_name': self.model_name,
+                            'text_encoder': 't5-base',
+                            'epochs': epochs,
+                            'batch_size': batch_size * self.accelerator.num_processes,
+                            'learning_rate': learning_rate,
+                            'gradient_accumulation_steps': gradient_accumulation_steps,
+                            'lora_r': lora_r,
+                            'lora_alpha': lora_alpha,
+                            'lora_dropout': lora_dropout,
+                            'validation_split': validation_split,
+                            'early_stopping_patience': early_stopping_patience,
+                            'generation_frequency': generation_frequency,
+                            'perceptual_loss_weight': perceptual_loss_weight
+                        },
+                        subdir=save_dir,
+                        is_best=True
+                    )
+                else:
+                    self.epochs_no_improve += 1
+                    self.logger.info(f"No improvement in validation loss for {self.epochs_no_improve} epochs.")
+
+                if self.epochs_no_improve >= early_stopping_patience:
+                    self.logger.info(f"Early stopping triggered after {self.epochs_no_improve} epochs without improvement.")
+                    break
+
+                save_dir = os.path.join(self.output_dir, f"checkpoint_epoch_{self.current_epoch}")
+                self.save_model_state(
+                    epoch=self.current_epoch,
+                    train_loss=avg_train_loss_epoch,
+                    val_loss=val_loss,
+                    hyperparameters={
+                        'model_name': self.model_name,
+                        'text_encoder': 't5-base',
+                        'epochs': epochs,
+                        'batch_size': batch_size * self.accelerator.num_processes,
+                        'learning_rate': learning_rate,
+                        'gradient_accumulation_steps': gradient_accumulation_steps,
+                        'lora_r': lora_r,
+                        'lora_alpha': lora_alpha,
+                        'lora_dropout': lora_dropout,
+                        'validation_split': validation_split,
+                        'early_stopping_patience': early_stopping_patience,
+                        'generation_frequency': generation_frequency,
+                        'perceptual_loss_weight': perceptual_loss_weight
+                    },
+                    subdir=save_dir
+                )
+
                 final_train_loss = avg_train_loss_epoch
+                final_val_loss = val_loss
                 final_epoch = self.current_epoch
                 final_hyperparameters = {
                     'model_name': self.model_name,
@@ -922,29 +1259,28 @@ class FinetuneModel:
                     'gradient_accumulation_steps': gradient_accumulation_steps,
                     'lora_r': lora_r,
                     'lora_alpha': lora_alpha,
-                    'lora_dropout': lora_dropout
+                    'lora_dropout': lora_dropout,
+                    'validation_split': validation_split,
+                    'early_stopping_patience': early_stopping_patience,
+                    'generation_frequency': generation_frequency,
+                    'perceptual_loss_weight': perceptual_loss_weight
                 }
 
                 self.accelerator.wait_for_everyone()
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            if self.accelerator.is_main_process:
-                save_dir = os.path.join(self.output_dir, f"final_model")
-                self.logger.info(f"Saving final model after training at Epoch {final_epoch} with Train Loss: {final_train_loss:.4f}")
-                self.save_model_state(epoch=final_epoch, train_loss=final_train_loss, hyperparameters=final_hyperparameters, subdir=save_dir)
-
-            self.logger.info(f"Training Finished - Final Train Loss: {final_train_loss:.4f} at Epoch {final_epoch}")
-            return final_train_loss, None, final_hyperparameters, final_epoch
+            self.logger.info(f"Training Finished - Final Train Loss: {final_train_loss:.4f}, Final Val Loss: {final_val_loss:.4f} at Epoch {final_epoch}")
+            return final_train_loss, final_val_loss, final_hyperparameters, final_epoch
 
         except Exception as e:
             self.logger.error(f"Fine-tuning failed: {e}\n{traceback.format_exc()}")
-            return float('inf'), None, None, -1
+            return float('inf'), float('inf'), None, -1
 
 def run_finetune(config_path, hyperparam_config_path):
     accelerator = Accelerator(
-        gradient_accumulation_steps=8,
-        mixed_precision='fp16',
+        gradient_accumulation_steps=4,  # Reduced to 4 to minimize numerical issues in FP16 (fallback if BF16 is unsupported)
+        mixed_precision='bf16',  # Switch to BF16 for better numerical stability (requires compatible hardware)
         log_with='tensorboard' if 'tensorboard' in globals() else None,
         project_dir=os.path.join(
             "/home/iris/Documents/deep_learning/experiments/trained_sdxl_t5_refiner", "logs"
@@ -1002,6 +1338,9 @@ def run_finetune(config_path, hyperparam_config_path):
     config_name = hyperparam_config["config_name"]
     config_output_dir = os.path.join(base_output_dir, config_name)
     if accelerator.is_main_process:
+        if os.path.exists(config_output_dir):
+            shutil.rmtree(config_output_dir)
+            logger.info(f"Cleared previous training directory: {config_output_dir}")
         os.makedirs(config_output_dir, exist_ok=True)
 
     logger.info(f"--- Running {config_name} ---")
@@ -1022,16 +1361,20 @@ def run_finetune(config_path, hyperparam_config_path):
             lora_dropout=hyperparam_config['hyperparameters']['lora_dropout']
         )
         logger.info("Starting fine-tuning on full dataset...")
-        final_train_loss, _, final_hyperparams, final_epoch = finetuner.fine_tune(
+        final_train_loss, final_val_loss, final_hyperparams, final_epoch = finetuner.fine_tune(
             dataset_path=dataset_path,
             dataset=full_dataset,
             epochs=hyperparam_config['hyperparameters']['epochs'],
             batch_size=hyperparam_config['hyperparameters']['batch_size'],
             learning_rate=float(hyperparam_config['hyperparameters']['learning_rate']),
-            gradient_accumulation_steps=config.get("gradient_accumulation_steps", 8),
+            gradient_accumulation_steps=config.get("gradient_accumulation_steps", 4),
             lora_r=hyperparam_config['hyperparameters']['lora_r'],
             lora_alpha=hyperparam_config['hyperparameters']['lora_alpha'],
-            lora_dropout=hyperparam_config['hyperparameters']['lora_dropout']
+            lora_dropout=hyperparam_config['hyperparameters']['lora_dropout'],
+            validation_split=hyperparam_config['hyperparameters']['validation_split'],
+            early_stopping_patience=hyperparam_config['hyperparameters']['early_stopping_patience'],
+            generation_frequency=hyperparam_config['hyperparameters']['generation_frequency'],
+            perceptual_loss_weight=hyperparam_config['hyperparameters']['perceptual_loss_weight']
         )
         if accelerator.is_main_process:
             performance_record = {
@@ -1039,12 +1382,13 @@ def run_finetune(config_path, hyperparam_config_path):
                 'config_name': config_name,
                 'hyperparameters': hyperparam_config['hyperparameters'],
                 'final_train_loss': float(final_train_loss) if not np.isnan(final_train_loss) else 'NaN',
+                'final_val_loss': float(final_val_loss) if not np.isnan(final_val_loss) else 'NaN',
             }
             summary_path = os.path.join(base_output_dir, f"{config_name}_performance.json")
             logger.info(f"Saving performance summary to {summary_path}")
             with open(summary_path, 'w') as f:
                 json.dump(performance_record, f, indent=4)
-            logger.info(f"Finished run for {config_name}. Final Train Loss: {final_train_loss:.4f}")
+            logger.info(f"Finished run for {config_name}. Final Train Loss: {final_train_loss:.4f}, Final Val Loss: {final_val_loss:.4f}")
     except Exception as e:
         logger.error(f"Run FAILED for {config_name}: {e}\n{traceback.format_exc()}")
         performance_record = {
@@ -1052,6 +1396,7 @@ def run_finetune(config_path, hyperparam_config_path):
             'config_name': config_name,
             'hyperparameters': hyperparam_config['hyperparameters'],
             'final_train_loss': 'FAILED',
+            'final_val_loss': 'FAILED',
             'error': str(e)
         }
         if accelerator.is_main_process:
