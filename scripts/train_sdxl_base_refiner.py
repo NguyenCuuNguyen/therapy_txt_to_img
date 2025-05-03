@@ -274,37 +274,122 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
 
         added_cond_kwargs = {"text_embeds": text_embeds, "time_ids": add_time_ids}
         return prompt_embeds, added_cond_kwargs
+    
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+        """
+        Prepares latent representations for the diffusion process.
+
+        Args:
+            batch_size (int): Number of images to generate.
+            num_channels_latents (int): Number of channels in the latent space (e.g., 4 for SDXL UNet).
+            height (int): Height of the output image.
+            width (int): Width of the output image.
+            dtype (torch.dtype): Data type for the latents (e.g., torch.float16).
+            device (torch.device): Device to place the latents on (e.g., cuda).
+            generator (torch.Generator, optional): Random number generator for reproducibility.
+            latents (torch.Tensor, optional): Pre-initialized latents, if any.
+
+        Returns:
+            torch.Tensor: Initialized latent tensor of shape (batch_size, num_channels_latents, height // vae_scale_factor, width // vae_scale_factor).
+        """
+        shape = (
+            batch_size,
+            num_channels_latents,
+            height // self.vae_scale_factor,
+            width // self.vae_scale_factor,
+        )
+
+        if latents is None:
+            latents = torch.randn(
+                shape,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            if latents.shape != shape:
+                raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
+            latents = latents.to(device=device, dtype=dtype)
+
+        # Scale initial noise according to scheduler
+        latents = latents * self.scheduler.init_noise_sigma
+        latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
+        return latents
 
     @torch.no_grad()
-    def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, generator=None, output_type="pil", refiner_steps=10,
-                 height=None, width=None, latents=None, return_dict=True, **kwargs):
+    def __call__(
+        self,
+        prompt,
+        negative_prompt=None,
+        num_inference_steps=50,
+        guidance_scale=7.5,
+        num_images_per_prompt=1,
+        generator=None,
+        output_type="pil",
+        refiner_steps=10,
+        height=None,
+        width=None,
+        latents=None,
+        return_dict=True,
+        **kwargs
+    ):
+        """
+        Generates images from a prompt using the diffusion process.
+
+        Args:
+            prompt (str or list): Text prompt(s) for generation.
+            negative_prompt (str or list, optional): Negative prompt(s) for classifier-free guidance.
+            num_inference_steps (int): Number of denoising steps.
+            guidance_scale (float): Guidance scale for classifier-free guidance.
+            num_images_per_prompt (int): Number of images to generate per prompt.
+            generator (torch.Generator, optional): Random number generator for reproducibility.
+            output_type (str): Output format ('pil', 'latent', or 'np').
+            refiner_steps (int): Number of refiner steps (if refiner_unet is provided).
+            height (int, optional): Output image height.
+            width (int, optional): Output image width.
+            latents (torch.Tensor, optional): Pre-initialized latents.
+            return_dict (bool): Whether to return a BaseOutput object.
+            **kwargs: Additional arguments (ignored).
+
+        Returns:
+            BaseOutput or tuple: Generated images in the specified format.
+        """
         device = self.device
-        dtype = torch.float32
-        if hasattr(self.unet, 'dtype'):
-            dtype = self.unet.dtype
+        dtype = self.unet.dtype if hasattr(self.unet, 'dtype') else torch.float32
 
         height = height or self.pipeline_config.get("image_size", 1024)
         width = width or self.pipeline_config.get("image_size", 1024)
 
-        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        batch_size = len(prompt) if isinstance(prompt, list) else 1
         do_classifier_free_guidance = guidance_scale > 1.0
 
+        # Encode prompt
         prompt_embeds, added_cond_kwargs = self._encode_prompt(
-            prompt, device, 1, do_classifier_free_guidance, negative_prompt=negative_prompt
+            prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt=negative_prompt
         )
         prompt_embeds = prompt_embeds.to(dtype)
         for k, v in added_cond_kwargs.items():
             if isinstance(v, torch.Tensor):
                 added_cond_kwargs[k] = v.to(dtype)
 
+        # Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
+        # Prepare latents
         num_channels_latents = self.unet.config.in_channels
         latents = self.prepare_latents(
-            batch_size, num_channels_latents, height, width, dtype, device, generator, latents,
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            dtype,
+            device,
+            generator,
+            latents,
         )
 
+        # Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -327,18 +412,43 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
+        # Optional refiner UNet step
         if self.refiner_unet is not None and refiner_steps > 0:
-            self.logger.warning("Refiner UNet step skipped: Requires separate encoding/projection logic not implemented here.")
+            self.logger.info("Running refiner UNet for additional denoising steps.")
+            self.scheduler.set_timesteps(refiner_steps, device=device)
+            refiner_timesteps = self.scheduler.timesteps
+            with self.progress_bar(total=refiner_steps) as progress_bar:
+                for i, t in enumerate(refiner_timesteps):
+                    latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
+                    noise_pred = self.refiner_unet(
+                        sample=latent_model_input,
+                        timestep=t,
+                        encoder_hidden_states=prompt_embeds,
+                        added_cond_kwargs=added_cond_kwargs
+                    ).sample
+
+                    if do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                    latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+
+                    if i == len(refiner_timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+
+        # Decode latents to images
         image = latents
-        if not output_type == "latent":
+        if output_type != "latent":
             self.vae.to(dtype=torch.float32)
             latents = latents.to(dtype=torch.float32)
             latents = latents / self.vae_scale_factor
             self.vae.to(device=latents.device)
-            image = self.vae.decode(latents).sample
+            with torch.no_grad():
+                image = self.vae.decode(latents).sample
             image = (image / 2 + 0.5).clamp(0, 1)
-            image = image.cpu().permute(0, 2, 3, 1).numpy()
+            image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
         if output_type == "pil":
             image = self.numpy_to_pil(image)
