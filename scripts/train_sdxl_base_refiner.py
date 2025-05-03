@@ -344,11 +344,31 @@ class FinetuneModel:
             self.refiner_unet = UNet2DConditionModel.from_pretrained(refiner_model_id, subfolder="unet")
             self.scheduler = DPMSolverMultistepScheduler.from_pretrained(base_model_id, subfolder="scheduler")
 
-            # Enable gradient checkpointing *before* PEFT wrapping or moving to device
-            # Note: Compatibility with FSDP might require careful placement of GC enabling
-            self.text_encoder.gradient_checkpointing_enable()
-            self.unet.gradient_checkpointing_enable()
-            self.refiner_unet.gradient_checkpointing_enable()
+            # --- Enable gradient checkpointing ---
+            # Use the correct method/attribute for each model type
+            self.logger.info("Attempting to enable gradient checkpointing...")
+            try:
+                # For T5EncoderModel (transformers)
+                self.text_encoder.gradient_checkpointing = True
+                self.logger.info("Enabled gradient checkpointing for T5 Text Encoder.")
+            except AttributeError:
+                 self.logger.warning("Could not enable gradient checkpointing for T5 Text Encoder via attribute.")
+                 # Add alternative ways if needed, or just log the warning.
+
+            try:
+                # For UNet2DConditionModel (diffusers)
+                self.unet.enable_gradient_checkpointing()
+                self.logger.info("Enabled gradient checkpointing for UNet.")
+            except AttributeError:
+                 self.logger.warning("Could not enable gradient checkpointing for UNet via method 'enable_gradient_checkpointing'.")
+
+            try:
+                 # For Refiner UNet (diffusers)
+                self.refiner_unet.enable_gradient_checkpointing()
+                self.logger.info("Enabled gradient checkpointing for Refiner UNet.")
+            except AttributeError:
+                 self.logger.warning("Could not enable gradient checkpointing for Refiner UNet via method 'enable_gradient_checkpointing'.")
+
 
             # Instantiate the custom pipeline (components still on CPU)
             self.pipeline = StableDiffusionXLPipelineWithT5(
@@ -381,6 +401,7 @@ class FinetuneModel:
         except Exception as e:
             self.logger.error(f"Failed to load model components: {e}\n{traceback.format_exc()}")
             raise
+
 
     def modify_architecture(self, apply_lora_to_unet=True, apply_lora_to_refiner=True, apply_lora_to_text_encoder=False, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self._apply_lora_unet_flag = apply_lora_to_unet
