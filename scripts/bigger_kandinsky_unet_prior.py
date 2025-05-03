@@ -1,4 +1,3 @@
-# --- Imports ---
 import os
 import torch
 import logging
@@ -90,7 +89,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         self.logger = logger_instance or logging.getLogger(__name__)
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
-        self.tokenizer.model_max_length = 512  # Force set to reasonable value
+        self.tokenizer.model_max_length = 512
         self.prior_embed_dim = getattr(prior.config, 'embedding_dim', 1280)
         self.projection_layer = nn.Linear(768, self.prior_embed_dim).to(
             device=self.prior.device, dtype=self.prior.dtype
@@ -101,14 +100,13 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         if not hasattr(self.prior, 'logger'):
             self.prior.logger = self.logger
 
-        # Add hooks for debugging
         def attention_hook(module, input, output):
             attn_scores = output[1] if isinstance(output, tuple) else output
             self.logger.debug(f"T5 block 1 attention scores stats - min: {attn_scores.min().item():.4f}, max: {attn_scores.max().item():.4f}, mean: {attn_scores.mean().item():.4f}")
             return output
 
         def dense_relu_dense_hook(module, input, output):
-            output = output / 1000.0  # Stronger scaling
+            output = output / 1000.0
             self.logger.debug(f"T5 block 1 DenseReluDense output stats - min: {output.min().item():.4f}, max: {output.max().item():.4f}, mean: {output.mean().item():.4f}")
             return output
 
@@ -211,7 +209,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             prompt = ["a generic description"] * batch_size
         self.logger.debug(f"Tokenizer model_max_length: {self.tokenizer.model_max_length}")
         text_inputs = self.tokenizer(
-            prompt, padding="max_length", max_length=512,  # Explicitly set max_length
+            prompt, padding="max_length", max_length=512,
             truncation=True, return_tensors="pt",
         ).to(device)
         input_ids = text_inputs.input_ids
@@ -220,16 +218,16 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         self.logger.debug(f"Input IDs sample: {input_ids[0, :10].tolist()}")
         self.logger.debug(f"Input IDs length: {input_ids.shape[1]}")
         self.logger.debug(f"Attention mask stats - min: {attention_mask.min().item()}, max: {attention_mask.max().item()}, mean: {attention_mask.float().mean().item():.4f}")
-        # Debug T5 intermediate outputs without autocast
         with torch.no_grad():
             encoder = self.text_encoder.encoder
-            hidden_states = self.text_encoder.shared(input_ids)  # Embedding layer
+            hidden_states = self.text_encoder.shared(input_ids) / 1000.0
             self.logger.debug(f"T5 embedding output stats - min: {hidden_states.min().item():.4f}, max: {hidden_states.max().item():.4f}, mean: {hidden_states.mean().item():.4f}")
             for i, block in enumerate(encoder.block):
-                # Stronger normalization before layer norm
                 hidden_states = hidden_states / (hidden_states.std(dim=-1, keepdim=True).clamp(min=1e-6) * 50.0)
-                hidden_states = block(hidden_states, attention_mask=attention_mask)[0] / 1000.0  # Stronger block scaling
-                hidden_states = torch.clamp(hidden_states, min=-500.0, max=500.0)  # Tighter clamp
+                hidden_states = block(hidden_states, attention_mask=attention_mask)[0]
+                scale = 10000.0 if i in [4, 6, 8] else 1000.0
+                hidden_states = hidden_states / scale
+                hidden_states = torch.clamp(hidden_states, min=-500.0, max=500.0)
                 self.logger.debug(f"T5 block {i} output stats - min: {hidden_states.min().item():.4f}, max: {hidden_states.max().item():.4f}, mean: {hidden_states.mean().item():.4f}")
             text_encoder_output = hidden_states
         last_hidden_state = text_encoder_output
@@ -242,7 +240,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         self.logger.debug(f"Prompt embeds before norm stats - min: {prompt_embeds.min().item():.4f}, max: {prompt_embeds.max().item():.4f}, mean: {prompt_embeds.mean().item():.4f}")
         std = prompt_embeds.std(dim=1, keepdim=True)
         if (std > 1e-6).all():
-            prompt_embeds = prompt_embeds / (std.clamp(min=1e-6) * 10.0)  # Extra scaling
+            prompt_embeds = prompt_embeds / (std.clamp(min=1e-6) * 10.0)
         else:
             self.logger.warning("Zero or near-zero std in prompt_embeds. Using random embeddings.")
             prompt_embeds = torch.randn_like(prompt_embeds) * 0.05
@@ -255,7 +253,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
             negative_prompt = negative_prompt or [""] * batch_size
             if isinstance(negative_prompt, str): negative_prompt = [negative_prompt] * batch_size
             negative_inputs = self.tokenizer(
-                negative_prompt, padding="max_length", max_length=512,  # Explicitly set max_length
+                negative_prompt, padding="max_length", max_length=512,
                 truncation=True, return_tensors="pt",
             ).to(device)
             negative_input_ids = negative_inputs.input_ids
@@ -383,7 +381,7 @@ class FinetuneModel:
         self.accelerator = accelerator
         self.logger = logger_instance or logging.getLogger(__name__)
         self.device = accelerator.device
-        self.dtype = torch.float32  # Use fp32 for debugging
+        self.dtype = torch.float32
         self.tokenizer = None
         self.text_encoder = None
         self.unet = None
@@ -396,27 +394,25 @@ class FinetuneModel:
         self.current_epoch = 0
         self._apply_lora_text_flag = False
         self._apply_lora_unet_flag = False
+        self.fold_val_losses = []
 
     def load_model(self):
         t5_model_name = "t5-base"
         prior_model_id = "kandinsky-community/kandinsky-2-2-prior"
         decoder_model_id = "kandinsky-community/kandinsky-2-2-decoder"
         try:
-            # Clear cache to ensure clean download
             cache_dir = "/home/iris/.cache/huggingface/hub/models--t5-base"
             if os.path.exists(cache_dir):
                 import shutil
                 shutil.rmtree(cache_dir)
             self.tokenizer = T5Tokenizer.from_pretrained(t5_model_name, force_download=True)
-            self.tokenizer.model_max_length = 512  # Force set
+            self.tokenizer.model_max_length = 512
             self.logger.debug(f"Tokenizer model_max_length set to: {self.tokenizer.model_max_length}")
             self.text_encoder = T5EncoderModel.from_pretrained(t5_model_name, force_download=True)
             self.text_encoder.to(self.device, dtype=self.dtype)
             self.text_encoder.gradient_checkpointing_enable()
-            # Debug T5 weights
             t5_weight_stats = {name: param.abs().mean().item() for name, param in self.text_encoder.named_parameters()}
             self.logger.debug(f"T5 encoder weight stats: {t5_weight_stats}")
-            # Test T5 encoder
             test_prompt = "a man standing in front of a grill"
             test_inputs = self.tokenizer([test_prompt], padding="max_length", max_length=512, truncation=True, return_tensors="pt").to(self.device)
             self.logger.debug(f"T5 test input IDs: {test_inputs['input_ids'][0, :10].tolist()}")
@@ -460,7 +456,8 @@ class FinetuneModel:
             try:
                 self.unet = get_peft_model(self.unet, lora_config_unet)
                 self.unet.print_trainable_parameters()
-            except Exception as e: self.logger.error(f"Failed LoRA UNet: {e}")
+            except Exception as e:
+                self.logger.error(f"Failed LoRA UNet: {e}")
         if apply_lora_to_text_encoder and hasattr(self.prior_pipeline, 'text_encoder') and hasattr(self.prior_pipeline, 'projection_layer'):
             text_target_modules = ["q", "k", "v", "o"]
             lora_config_text = LoraConfig(
@@ -494,11 +491,6 @@ class FinetuneModel:
                 try:
                     image_filenames = batch.get('image')
                     prompts = batch.get('prompt')
-                    self.logger.debug(f"Val Step {step+1}: Prompts: {prompts}")
-                    if not image_filenames or not prompts or \
-                       not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
-                        self.logger.warning(f"Val Step {step+1}: Invalid prompts or image filenames")
-                        continue
                     pixel_values_list = []
                     valid_prompts = []
                     for img_filename, prompt in zip(image_filenames, prompts):
@@ -547,7 +539,7 @@ class FinetuneModel:
                     timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
                     noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
                     if torch.isnan(noisy_latents).any() or torch.isinf(noisy_latents).any():
-                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in noisy_lat -inf in noisy_latents")
+                        self.logger.warning(f"Val Step {step+1}: NaN/Inf in noisy_latents")
                         continue
                     noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
                     noisy_latents = noisy_latents / noisy_latents.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
@@ -584,12 +576,19 @@ class FinetuneModel:
         self.prior_pipeline.text_encoder.train()
         if hasattr(self.prior_pipeline, 'projection_layer') and any(p.requires_grad for p in self.prior_pipeline.projection_layer.parameters()):
             self.prior_pipeline.projection_layer.train()
+        self.logger.info(f"Validation completed - Avg validation loss: {avg_val_loss:.4f}, Batches: {num_val_batches}")
         return avg_val_loss
 
-    def save_model_state(self, epoch=None, val_loss=None, hyperparameters=None):
-        if not self.accelerator.is_main_process: return
-        output_subdir = self.output_dir
-        os.makedirs(output_subdir, exist_ok=True)
+    def save_model_state(self, epoch=None, val_loss=None, hyperparameters=None, subdir=None):
+        if not self.accelerator.is_main_process:
+            return
+        output_subdir = subdir if subdir is not None else self.output_dir
+        try:
+            os.makedirs(output_subdir, exist_ok=True)
+            self.logger.debug(f"Created output directory: {output_subdir}")
+        except Exception as e:
+            self.logger.error(f"Failed to create output directory {output_subdir}: {e}")
+            return
         save_label = "best"
         val_loss_str = f"{val_loss:.4f}" if val_loss is not None and not np.isnan(val_loss) else "N/A"
         save_paths = {}
@@ -600,7 +599,7 @@ class FinetuneModel:
                 save_paths["UNet_LoRA"] = unet_path
                 self.logger.info(f"Saved UNet LoRA to {unet_path}")
             except Exception as e:
-                self.logger.error(f"Failed save UNet LoRA: {e}")
+                self.logger.error(f"Failed to save UNet LoRA to {unet_path}: {e}")
         if hasattr(self.prior_pipeline, 'text_encoder') and isinstance(self.prior_pipeline.text_encoder, PeftModel):
             try:
                 text_encoder_path = os.path.join(output_subdir, f"{save_label}_text_encoder_lora")
@@ -608,7 +607,7 @@ class FinetuneModel:
                 save_paths["TextEncoder_LoRA"] = text_encoder_path
                 self.logger.info(f"Saved TextEncoder LoRA to {text_encoder_path}")
             except Exception as e:
-                self.logger.error(f"Failed save TextEncoder LoRA: {e}")
+                self.logger.error(f"Failed to save TextEncoder LoRA to {text_encoder_path}: {e}")
         if hasattr(self.prior_pipeline, 'projection_layer'):
             is_proj_trainable = any(p.requires_grad for p in self.prior_pipeline.projection_layer.parameters())
             if is_proj_trainable:
@@ -619,27 +618,29 @@ class FinetuneModel:
                     save_paths["Projection_Layer"] = proj_layer_path
                     self.logger.info(f"Saved Projection Layer to {proj_layer_path}")
                 except Exception as e:
-                    self.logger.error(f"Failed save Projection Layer: {e}")
+                    self.logger.error(f"Failed to save Projection Layer to {proj_layer_path}: {e}")
         if hyperparameters:
             hyperparameters['_apply_lora_text_encoder'] = self._apply_lora_text_flag
             hyperparameters['_apply_lora_unet'] = self._apply_lora_unet_flag
             hyperparam_path = os.path.join(output_subdir, f"{save_label}_hyperparameters.json")
-            save_data = { 'model_name': self.model_name, 'epoch': epoch, 'validation_loss': val_loss_str, 'hyperparameters': hyperparameters }
+            save_data = {'model_name': self.model_name, 'epoch': epoch, 'validation_loss': val_loss_str, 'hyperparameters': hyperparameters}
             try:
                 with open(hyperparam_path, 'w') as f:
                     json.dump(save_data, f, indent=4)
                 self.logger.info(f"Saved hyperparameters to {hyperparam_path}")
             except Exception as e:
-                self.logger.error(f"Failed save hyperparameters: {e}")
+                self.logger.error(f"Failed to save hyperparameters to {hyperparam_path}: {e}")
         if not save_paths:
             self.logger.warning(f"No trainable weights were saved for {self.model_name} ({save_label}).")
+        else:
+            self.logger.info(f"Saved model components: {save_paths}")
 
     def fine_tune(self, dataset_path, train_val_splits, epochs=1, batch_size=1, learning_rate=5e-8, gradient_accumulation_steps=8, lora_r=8, lora_alpha=16, lora_dropout=0.1):
         self.logger.info(f"Requested learning rate: {learning_rate}")
         if learning_rate > 5e-8:
             self.logger.warning(f"High learning rate detected: {learning_rate}. Capping at 5e-8 for stability.")
             learning_rate = 5e-8
-        fold_val_losses = []
+        self.fold_val_losses = []
         global_best_avg_val_loss = float('inf')
         global_best_hyperparameters = None
         global_best_epoch = -1
@@ -722,10 +723,10 @@ class FinetuneModel:
                             image_filenames = batch.get('image')
                             prompts = batch.get('prompt')
                             batch_idx = step * batch_size
-                            self.logger.debug(f"Train Step {step+1} (Batch {batch_idx}): Prompts: {prompts}")
+                            self.logger.debug(f"Fold {fold_idx+1}, Epoch {self.current_epoch}, Train Step {step+1} (Batch {batch_idx}): Prompts: {prompts}")
                             if not image_filenames or not prompts or \
                                not isinstance(prompts, list) or not all(isinstance(p, str) and p.strip() for p in prompts):
-                                self.logger.warning(f"Train Step {step+1}: Invalid prompts or image filenames")
+                                self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: Invalid prompts or image filenames")
                                 continue
                             pixel_values_list = []
                             valid_prompts = []
@@ -735,24 +736,24 @@ class FinetuneModel:
                                     image = Image.open(image_path).convert('RGB').resize((self.image_size, self.image_size))
                                     image_np = np.array(image).astype(np.float32) / 255.0
                                     if np.any(np.isnan(image_np)) or np.any(np.isinf(image_np)):
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in image {img_filename}")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: NaN/Inf in image {img_filename}")
                                         continue
                                     image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
                                     pixel_values_list.append(image_tensor)
                                     valid_prompts.append(prompt)
                                 except Exception as img_err:
-                                    self.logger.debug(f"Train Skip img {img_filename}: {img_err}")
+                                    self.logger.debug(f"Fold {fold_idx+1}, Train Skip img {img_filename}: {img_err}")
                             if not pixel_values_list or not valid_prompts:
-                                self.logger.debug(f"Skipping train batch {step+1}: No valid images or prompts loaded.")
+                                self.logger.debug(f"Fold {fold_idx+1}, Skipping train batch {step+1}: No valid images or prompts loaded.")
                                 continue
                             pixel_values = torch.stack(pixel_values_list).to(self.accelerator.device)
-                            self.logger.debug(f"Train Step {step+1}: Image batch stats - min: {pixel_values.min().item():.4f}, max: {pixel_values.max().item():.4f}, mean: {pixel_values.mean().item():.4f}")
+                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Image batch stats - min: {pixel_values.min().item():.4f}, max: {pixel_values.max().item():.4f}, mean: {pixel_values.mean().item():.4f}")
                             prompts = valid_prompts
                             if step + 1 == 16:
-                                self.logger.debug(f"Train Step {step+1}: Detailed debug mode activated")
+                                self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Detailed debug mode activated")
                             if hasattr(self.prior_pipeline, 'text_encoder'):
                                 self.prior_pipeline.text_encoder.eval()
-                                self.logger.debug(f"Set text_encoder to eval mode for prior pipeline call.")
+                                self.logger.debug(f"Fold {fold_idx+1}, Set text_encoder to eval mode for prior pipeline call.")
                             with self.accelerator.accumulate(self.unet):
                                 with torch.cuda.amp.autocast():
                                     prior_output = self.prior_pipeline(
@@ -762,7 +763,7 @@ class FinetuneModel:
                                     )
                                     image_embeds = prior_output.image_embeds.to(dtype=self.dtype)
                                     if torch.isnan(image_embeds).any() or torch.isinf(image_embeds).any():
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in image_embeds")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: NaN/Inf in image_embeds")
                                         continue
                                     image_embeds = torch.nan_to_num(image_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
                                     with torch.no_grad():
@@ -771,24 +772,24 @@ class FinetuneModel:
                                         latents = vae_output.latents * getattr(self.vae.config, 'scaling_factor', 0.18215)
                                         latents = latents.to(dtype=self.dtype)
                                     if torch.isnan(latents).any() or torch.isinf(latents).any():
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: NaN/Inf in latents")
                                         continue
                                     latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
                                     noise = torch.randn_like(latents)
                                     if torch.isnan(noise).any() or torch.isinf(noise).any():
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in noise")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: NaN/Inf in noise")
                                         continue
                                     noise = torch.nan_to_num(noise, nan=0.0, posinf=1.0, neginf=-1.0)
                                     timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
                                     noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
                                     if torch.isnan(noisy_latents).any() or torch.isinf(noisy_latents).any():
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in noisy_latents")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: NaN/Inf in noisy_latents")
                                         continue
                                     noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
                                     noisy_latents = noisy_latents / noisy_latents.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
                                     image_embeds = image_embeds / image_embeds.std(dim=1, keepdim=True).clamp(min=1e-6)
-                                    self.logger.debug(f"Train Step {step+1}: Noisy latents stats - min: {noisy_latents.min().item():.4f}, max: {noisy_latents.max().item():.4f}, mean: {noisy_latents.mean().item():.4f}")
-                                    self.logger.debug(f"Train Step {step+1}: Image embeds stats - min: {image_embeds.min().item():.4f}, max: {image_embeds.max().item():.4f}, mean: {image_embeds.mean().item():.4f}")
+                                    self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Noisy latents stats - min: {noisy_latents.min().item():.4f}, max: {noisy_latents.max().item():.4f}, mean: {noisy_latents.mean().item():.4f}")
+                                    self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Image embeds stats - min: {image_embeds.min().item():.4f}, max: {image_embeds.max().item():.4f}, mean: {image_embeds.mean().item():.4f}")
                                     added_cond_kwargs = {"image_embeds": image_embeds.to(dtype=self.dtype)}
                                     model_pred = self.unet(
                                         sample=noisy_latents,
@@ -797,18 +798,18 @@ class FinetuneModel:
                                         added_cond_kwargs=added_cond_kwargs
                                     ).sample
                                     if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
-                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in model_pred")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: NaN/Inf in model_pred")
                                         continue
                                     model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
                                     model_pred = torch.clamp(model_pred, -1.0, 1.0)
                                     if model_pred.shape[1] == 8 and noise.shape[1] == 4:
                                         model_pred = model_pred[:, :4, :, :]
-                                    self.logger.debug(f"Train Step {step+1}: model_pred stats - min: {model_pred.min().item():.4f}, max: {model_pred.max().item():.4f}, mean: {model_pred.mean().item():.4f}")
-                                    self.logger.debug(f"Train Step {step+1}: noise stats - min: {noise.min().item():.4f}, max: {noise.max().item():.4f}, mean: {noise.mean().item():.4f}")
+                                    self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: model_pred stats - min: {model_pred.min().item():.4f}, max: {model_pred.max().item():.4f}, mean: {model_pred.mean().item():.4f}")
+                                    self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: noise stats - min: {noise.min().item():.4f}, max: {noise.max().item():.4f}, mean: {noise.mean().item():.4f}")
                                     loss = torch.nn.functional.mse_loss(model_pred.float(), noise.float(), reduction="mean")
-                                    self.logger.debug(f"Train Step {step+1}: Loss: {loss.item():.4f}")
+                                    self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Loss: {loss.item():.4f}")
                                     if torch.isnan(loss) or torch.isinf(loss):
-                                        self.logger.warning(f"Train Step {step+1}: Calculated loss is NaN or Inf")
+                                        self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: Calculated loss is NaN or Inf")
                                         continue
                                 self.accelerator.backward(loss / gradient_accumulation_steps * 50.0)
                                 if self.accelerator.sync_gradients:
@@ -817,36 +818,36 @@ class FinetuneModel:
                                         valid_gradients = True
                                         try:
                                             raw_grad_norm = torch.norm(torch.stack([torch.norm(p.grad, 2) for p in params_to_optimize if p.grad is not None]), 2)
-                                            self.logger.debug(f"Train Step {step+1}: Raw gradient norm: {raw_grad_norm.item():.4f}")
+                                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Raw gradient norm: {raw_grad_norm.item():.4f}")
                                             grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 0.5)
-                                            self.logger.debug(f"Train Step {step+1}: Clipped gradient norm: {grad_norm.item():.4f}")
+                                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Clipped gradient norm: {grad_norm.item():.4f}")
                                             scaler_state = self.accelerator.scaler.state_dict()
-                                            self.logger.debug(f"Train Step {step+1}: Gradient scaler state - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
+                                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Gradient scaler state - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
                                         except ValueError as e:
-                                            self.logger.warning(f"Train Step {step+1}: Skipping optimizer step due to NaN/Inf gradients")
+                                            self.logger.warning(f"Fold {fold_idx+1}, Train Step {step+1}: Skipping optimizer step due to NaN/Inf gradients")
                                             valid_gradients = False
-                                            self.logger.debug(f"Train Step {step+1}: Invalid gradients detected")
+                                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Invalid gradients detected")
                                             scaler_state = self.accelerator.scaler.state_dict()
-                                            self.logger.debug(f"Train Step {step+1}: Gradient scaler state on failure - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
+                                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Gradient scaler state on failure - scale: {scaler_state['scale']}, growth_interval: {scaler_state['growth_interval']}")
                                         if valid_gradients and not torch.isnan(grad_norm) and not torch.isinf(grad_norm):
                                             self.optimizer.step()
                                             self.optimizer.zero_grad()
                                         else:
-                                            self.logger.debug(f"Train Step {step+1}: Optimizer step skipped due to invalid gradients")
+                                            self.logger.debug(f"Fold {fold_idx+1}, Train Step {step+1}: Optimizer step skipped due to invalid gradients")
                                             num_skipped_steps += 1
                                 train_loss_epoch += self.accelerator.gather(loss).mean().item() * gradient_accumulation_steps
                                 num_train_batches_epoch += 1
                                 if self.accelerator.is_main_process and global_step % 25 == 0:
-                                    self.logger.info(f"Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {loss.item():.4f}, Skipped Steps: {num_skipped_steps}")
+                                    self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch}, Step {global_step}/{max_train_steps}, Train Loss: {loss.item():.4f}, Skipped Steps: {num_skipped_steps}")
                                 global_step += 1
                         except Exception as e:
-                            self.logger.error(f"Training step {step+1} failed: {e}\n{traceback.format_exc()}")
+                            self.logger.error(f"Fold {fold_idx+1}, Training step {step+1} failed: {e}\n{traceback.format_exc()}")
                             if "out of memory" in str(e).lower():
                                 self.logger.error("OOM Error detected. Try smaller batch size or gradient accumulation.")
                             continue
                     avg_train_loss_epoch = train_loss_epoch / num_train_batches_epoch if num_train_batches_epoch > 0 else float('nan')
                     if self.accelerator.is_main_process:
-                        self.logger.info(f"Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Skipped Steps: {num_skipped_steps}/{num_train_batches_epoch}")
+                        self.logger.info(f"Fold {fold_idx+1}, Epoch {self.current_epoch} Finished - Avg Train Loss: {avg_train_loss_epoch:.4f}, Skipped Steps: {num_skipped_steps}/{num_train_batches_epoch}")
                     avg_val_loss = float('inf')
                     if val_dataloader:
                         if self.accelerator.is_main_process:
@@ -857,93 +858,25 @@ class FinetuneModel:
                         if not np.isnan(current_loss_for_comparison) and current_loss_for_comparison < self.best_val_loss:
                             self.best_val_loss = current_loss_for_comparison
                             self.best_epoch = self.current_epoch
-                            self.save_model_state(epoch=self.best_epoch, val_loss=self.best_val_loss, hyperparameters=hyperparameters)
                     self.accelerator.wait_for_everyone()
                     gc.collect()
                     torch.cuda.empty_cache()
-                fold_val_losses.append(self.best_val_loss if not np.isnan(self.best_val_loss) else float('inf'))
+                self.fold_val_losses.append(self.best_val_loss if not np.isnan(self.best_val_loss) else float('inf'))
                 if self.best_val_loss < global_best_avg_val_loss:
                     global_best_avg_val_loss = self.best_val_loss
                     global_best_hyperparameters = hyperparameters
                     global_best_epoch = self.best_epoch
             except Exception as e:
                 self.logger.error(f"Fold {fold_idx + 1} failed entirely: {e}\n{traceback.format_exc()}")
-                fold_val_losses.append(float('inf'))
+                self.fold_val_losses.append(float('inf'))
             self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
-            valid_losses = [loss for loss in fold_val_losses if loss != float('inf')]
+            valid_losses = [loss for loss in self.fold_val_losses if loss != float('inf')]
             avg_val_loss = np.mean(valid_losses) if valid_losses else float('inf')
             self.logger.info(f"Training Finished - Avg validation loss: {avg_val_loss:.4f} across {len(valid_losses)} valid folds")
-            self.save_model_state(epoch=global_best_epoch, val_loss=avg_val_loss, hyperparameters=global_best_hyperparameters)
-        return avg_val_loss, None, global_best_hyperparameters, global_best_epoch
-
-# --- Main Execution Placeholder ---
-if __name__ == "__main__":
-    logger.info("Script execution started.")
-    CONFIG_PATH = "/home/iris/Documents/deep_learning/config/config.yaml"
-    config = load_config(CONFIG_PATH)
-    if config is None:
-        logger.error("Exiting due to missing or invalid configuration.")
-        exit(1)
-    output_dir = config.get('base_output_dir', './output')
-    model_name = config.get('model_name', 'kandinsky')
-    dataset_path = config.get('dataset_path', None)
-    if not dataset_path:
-        logger.error("Dataset path not specified in config.")
-        exit(1)
-    epochs = config.get('epochs', 5)
-    batch_size = config.get('batch_size', 1)
-    learning_rate = config.get('learning_rate', 5e-8)
-    gradient_accumulation_steps = config.get('gradient_accumulation_steps', 8)
-    num_folds = config.get('k_folds', 5)
-    apply_lora_unet = config.get('apply_lora_unet', True)
-    apply_lora_text_encoder = config.get('apply_lora_text_encoder', False)
-    lora_r = config.get('lora_r', 8)
-    lora_alpha = config.get('lora_alpha', 16)
-    lora_dropout = config.get('lora_dropout', 0.1)
-    os.makedirs(output_dir, exist_ok=True)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        log_with="tensorboard",
-        project_dir=os.path.join(output_dir, "logs"),
-        mixed_precision="no"  # Use fp32 for debugging
-    )
-    logger.info(f"Accelerator initialized on device: {accelerator.device}")
-    logging.getLogger().setLevel(logging.DEBUG if accelerator.is_main_process else logging.ERROR)
-    try:
-        logger.info(f"Loading dataset from: {dataset_path} with {num_folds} folds")
-        train_val_splits_data = load_dataset(dataset_path, num_folds)
-        if not train_val_splits_data:
-            raise ValueError("load_dataset returned empty splits.")
-        logger.info(f"Loaded {len(train_val_splits_data)} dataset folds.")
-    except Exception as e:
-        logger.error(f"Failed to load dataset: {e}\n{traceback.format_exc()}")
-        exit(1)
-    try:
-        finetuner = FinetuneModel(model_name, output_dir, accelerator, logger)
-        finetuner.load_model()
-        finetuner.modify_architecture(
-            apply_lora_to_unet=apply_lora_unet,
-            apply_lora_to_text_encoder=apply_lora_text_encoder,
-            lora_r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout
-        )
-        avg_loss, _, hyperparams, best_epoch = finetuner.fine_tune(
-            dataset_path=dataset_path,
-            train_val_splits=train_val_splits_data,
-            epochs=epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            lora_r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout
-        )
-        if accelerator.is_main_process:
-            logger.info(f"Fine-tuning completed. Average validation loss: {avg_loss}")
-            finetuner.save_model_state(epoch=best_epoch, val_loss=avg_loss, hyperparameters=hyperparams)
-    except Exception as e:
-        logger.error(f"Fine-tuning process failed: {e}\n{traceback.format_exc()}")
-        accelerator.set_trace()
-    logger.info("Script execution finished.")
+        model_state = {
+            'unet': self.accelerator.get_state_dict(self.unet) if isinstance(self.unet, PeftModel) else None,
+            'text_encoder': self.accelerator.get_state_dict(self.prior_pipeline.text_encoder) if hasattr(self.prior_pipeline, 'text_encoder') and isinstance(self.prior_pipeline.text_encoder, PeftModel) else None,
+            'projection_layer': self.accelerator.get_state_dict(self.prior_pipeline.projection_layer) if hasattr(self.prior_pipeline, 'projection_layer') and any(p.requires_grad for p in self.prior_pipeline.projection_layer.parameters()) else None
+        }
+        return avg_val_loss, model_state, global_best_hyperparameters, global_best_epoch
