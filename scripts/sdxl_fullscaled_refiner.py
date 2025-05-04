@@ -449,6 +449,9 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
             device,
             None,
         ).to(device, dtype=dtype)
+        # Explicitly ensure 4D tensor
+        if latents.dim() == 3:
+            latents = latents.unsqueeze(0)
         logger.debug(f"Latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
         log_tensor_stats(latents, "Initial latents")
         log_memory_usage()
@@ -509,6 +512,9 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
 
             noise_pred = noise_pred.to(device, dtype=dtype)
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample.to(device, dtype=dtype)
+            # Ensure latents is 4D
+            if latents.dim() == 3:
+                latents = latents.unsqueeze(0)
             logger.debug(f"Updated latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
             log_tensor_stats(latents, "Updated latents")
 
@@ -573,9 +579,17 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
                 # Reload refiner prompt_embeds and added_cond_kwargs to GPU
                 prompt_embeds = refiner_prompt_embeds.to(device, dtype=dtype)
                 added_cond_kwargs = {k: v.to(device, dtype=dtype) for k, v in refiner_added_cond_kwargs.items()}
-
+                # Ensure latents is 4D
+                if latents.dim() == 3:
+                    latents = latents.unsqueeze(0)
+                logger.debug(f"Latents shape before CFG: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
                 latent_model_input = torch.cat([latents] * 2).to(device, dtype=dtype) if guidance_scale > 1.0 else latents
                 latent_model_input = refiner.scheduler.scale_model_input(latent_model_input, t).to(device, dtype=dtype)
+                # Ensure latent_model_input is 4D
+                if latent_model_input.dim() == 3:
+                    latent_model_input = latent_model_input.unsqueeze(0)
+                logger.debug(f"Latent_model_input shape after scale_model_input: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
+                
                 logger.debug(f"Refiner latent_model_input shape: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
                 log_tensor_stats(latent_model_input, "Refiner latent_model_input")
 
@@ -606,6 +620,10 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
 
                 noise_pred = noise_pred.to(device, dtype=dtype)
                 latents = refiner.scheduler.step(noise_pred, t, latents).prev_sample.to(device, dtype=dtype)
+                # Ensure latents is 4D
+                if latents.dim() == 3:
+                    latents = latents.unsqueeze(0)
+                
                 logger.debug(f"Refiner updated latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
                 log_tensor_stats(latents, "Refiner updated latents")
 
