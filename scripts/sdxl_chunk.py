@@ -380,9 +380,9 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
     def __call__( 
         self, 
         prompt, 
-        height=128,  # Further reduced resolution 
-        width=128, 
-        num_inference_steps=15,  # Further reduced steps 
+        height=192,  # Further reduced resolution 
+        width=192, 
+        num_inference_steps=30,  # Further reduced steps 
         guidance_scale=9.0, 
         negative_prompt=None, 
         num_images_per_prompt=1, 
@@ -671,7 +671,7 @@ def generate_images_for_csv_rows(
     # ) 
 
     negative_prompt = ( 
-        "text, words, letters" 
+        "text, words, letters, abstract, non-realistic, blurry, distorted"
     ) 
 
     prompt_cache = LRUCache(capacity=50) 
@@ -702,7 +702,7 @@ def generate_images_for_csv_rows(
                         prompt=refined_prompt, 
                         height=64,  # Further reduced resolution 
                         width=64, 
-                        num_inference_steps=10,  # Further reduced steps 
+                        num_inference_steps=25,  # Further reduced steps 
                         guidance_scale=9.0, 
                         negative_prompt=negative_prompt, 
                         num_images_per_prompt=1, 
