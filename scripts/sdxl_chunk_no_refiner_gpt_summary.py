@@ -2,7 +2,6 @@ import os
 import logging
 import torch
 from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
-import pandas as pd
 import yaml
 from PIL import Image
 import numpy as np
@@ -15,10 +14,11 @@ from accelerate import Accelerator
 from transformers import T5Tokenizer
 from src.utils.openai_utils import OpenAIUtils  # Import OpenAIUtils for prompt refinement
 from collections import OrderedDict  # For LRU cache implementation
+import re
 
 # Configure logging
 log_dir = "/home/iris/Documents/deep_learning/src/logs"
-log_file = os.path.join(log_dir, "sdxl_chunks_noRefiner.log")
+log_file = os.path.join(log_dir, "sdxl_chunks_noRefiner_gpt_summary.log")
 
 # Ensure the log directory exists
 os.makedirs(log_dir, exist_ok=True)
@@ -522,6 +522,14 @@ def load_theory_prompts(yaml_path):
         logger.error(f"Failed to load YAML from {yaml_path}: {e}")
         raise
 
+def extract_theory_essence(prompt):
+    """Extract the theory-specific essence from a prompt."""
+    # Extract the sentence after '{txt_prompt}.' and before 'Do not include'
+    match = re.search(r'\{txt_prompt\}\.\s*(.*?)\s*Do not include', prompt)
+    if match:
+        return match.group(1)
+    return ""
+
 def load_id_list(id_list_path):
     """Load list of IDs from a text file."""
     try:
@@ -532,30 +540,70 @@ def load_id_list(id_list_path):
         logger.error(f"Failed to load ID list from {id_list_path}: {e}")
         raise
 
-def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
-    """Load CSV rows in chunks where 'file' matches values in id_list, excluding 'file' column."""
-    id_list = [str(id_val) for id_val in id_list]
-    prompts = []
-    for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
-        if "file" not in chunk.columns:
-            raise ValueError("CSV does not contain a 'file' column")
-        selected_rows = chunk[chunk["file"].astype(str).isin(id_list)]
-        if selected_rows.empty:
+def clean_transcript(text):
+    """Clean transcript text by removing timestamps, speaker labels, and special characters."""
+    # Remove timestamps (e.g., [00:01:23])
+    text = re.sub(r'\[\d{2}:\d{2}:\d{2}\]', '', text)
+    # Remove speaker labels (e.g., Speaker 1:, Interviewer:)
+    text = re.sub(r'^\w+\s*\w*:\s*', '', text, flags=re.MULTILINE)
+    # Remove special characters and extra whitespace
+    text = re.sub(r'[^\w\s,.!?-]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def load_transcripts_by_ids(transcript_dir, id_list):
+    """Load and clean transcripts for the given IDs."""
+    transcripts = []
+    for id_val in id_list:
+        file_path = os.path.join(transcript_dir, f"{id_val}.txt")
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            cleaned_content = clean_transcript(content)
+            transcripts.append((id_val, cleaned_content))
+            logger.debug(f"Loaded and cleaned transcript for ID {id_val}: {cleaned_content[:100]}...")
+        except Exception as e:
+            logger.error(f"Failed to load transcript {file_path}: {e}")
             continue
-        for _, row in selected_rows.iterrows():
-            row_dict = row.to_dict()
-            prompt_parts = [
-                f"{key}: {value}"
-                for key, value in row_dict.items()
-                if key not in ["file"] and pd.notnull(value)
-            ]
-            txt_prompt = "; ".join(prompt_parts)
-            prompts.append((row_dict["file"], txt_prompt))
-        del chunk
-        cleanup_memory()
-    if not prompts:
-        raise ValueError(f"No rows found in CSV with IDs: {id_list}")
-    return prompts
+    if not transcripts:
+        raise ValueError(f"No valid transcripts found for IDs: {id_list}")
+    return transcripts
+
+def summarize_transcript_with_openai(openai_util, transcript, theory, theory_essence, tokenizer, max_tokens=300):
+    """Summarize transcript using OpenAI API with theory-specific essence."""
+    system_prompt = (
+        f"You are an expert in psychotherapy, specializing in {theory} theory. Your task is to summarize the provided transcript by identifying key themes (e.g., family relationships, mental health management) "
+        f"and describing them in a way that can be visually represented in an abstract, symbolic manner. The summary should {theory_essence.lower()}. "
+        "The summary should be prompt but descriptive, with photorealistic, imagery-rich descriptions (e.g., 'a stormy sea representing emotional turmoil, with a lighthouse symbolizing hope') "
+        "to guide image generation, while avoiding literal depictions of therapy settings or text. Output only the summarized prompt, with no additional explanations or formatting, targeting around {max_tokens} tokens."
+    )
+    user_prompt = (
+        f"Summarize the following transcript from a {theory} psychotherapy perspective, ensuring the summary {theory_essence.lower()}. "
+        f"Include photorealistic, imagery-rich cues for abstract image generation. Avoid literal therapy settings or text. Target around {max_tokens} tokens.\n\nTranscript:\n{transcript}"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    try:
+        response = openai_util.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.3,  # Low temperature for focused summarization
+            max_tokens=max_tokens + 50  # Buffer for token count
+        )
+        summarized_prompt = response.choices[0].message.content.strip()
+        token_count = len(tokenizer(summarized_prompt, truncation=False)["input_ids"])
+        logger.debug(f"Summarized prompt token count: {token_count}")
+        if token_count > max_tokens:
+            summarized_prompt = summarize_prompt(summarized_prompt, max_tokens=max_tokens)
+        return summarized_prompt
+    except Exception as e:
+        logger.error(f"Failed to summarize transcript with OpenAI for {theory}: {e}")
+        # Fallback: use a generic prompt
+        return f"Abstract representation of emotional themes in a person's life, with vibrant colors and symbolic imagery, reflecting {theory} perspective."
 
 def upscale_image(image_path, output_path, target_size=(1024, 1024)):
     """Upscale a single image to the target size and save it to the output path."""
@@ -573,15 +621,15 @@ def upscale_image(image_path, output_path, target_size=(1024, 1024)):
 def refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=300):
     """Refine the prompt using OpenAI API to add visual cues while keeping token count within limit."""
     system_prompt = (
-        "You are an expert prompt engineer for image generation from psychotherapy theory perspective. Given a psychotherapy theory and relevant information about a person, Your task is to refine the provided prompt by adding "
-        "photorealistic descriptive visual cues (e.g., 'a woman sitting and thinking deeply about family, with images of school, children, and old parents in the background. In front of her are opened notebooks with F grades.') "
+        "You are an expert prompt engineer for image generation from psychotherapy theory perspective. Your task is to enhance the given prompt by incorporating vivid, photorealistic visual elements that symbolically express the individual’s inner world and life experiences (e.g., 'a woman lost in thought, surrounded by faint images of children, elderly parents, and school report cards with failing grades'). "
         "to make the image more illustrative of the person's life, meaningful and visually coherent, while preserving the core themes and instructions. "
+        "Ensure the prompt fits a 1024x1024 image without cropping, avoids literal depictions of therapy settings, and includes no written text or letters. "
         "Output only the refined prompt, with no additional explanations or formatting."
     )
     user_prompt = (
-        f"Refine the following prompt by adding photorealistic visual cues (e.g., a man feeding his dog with 2 children playing in the background) to enhance its visual coherence for image generation, "
-        f"while keeping the core themes and instructions intact. Target around {target_max_tokens} tokens. "
-        f"Prompt:\n\n\"{prompt}\""
+        f"Refine the following prompt by adding visual cues, description of symbolism, vivid imageries, to enhance its visual coherence for image generation, "
+        f"while keeping the core themes and instructions intact. Ensure it fits 1024x1024 without cropping, avoids therapy settings, and excludes text. "
+        f"Target around {target_max_tokens} tokens. Prompt:\n\n\"{prompt}\""
     )
 
     messages = [
@@ -605,21 +653,21 @@ def refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=
     except Exception as e:
         logger.error(f"Failed to refine prompt with OpenAI: {e}")
         # Fallback: add a simple visual cue
-        return f"{prompt}, with literal and interpretable illustrative"
+        return f"{prompt}, with vibrant colors and symbolic imagery"
 
-def generate_images_for_csv_rows(
-    csv_path,
+def generate_images_for_transcripts(
+    transcript_dir,
     yaml_path,
     id_list_path,
-    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner",
-    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner_temp",
+    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner_gpt",
+    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner_gpt_temp",
     chunk_size=1,
 ):
-    """Generate abstract images for CSV rows with matching IDs using theory prompts."""
+    """Generate abstract images for transcripts with matching IDs using theory prompts."""
     accelerator = Accelerator(
         cpu=False,
         mixed_precision="no",  # Disable mixed precision to use float32
-        device_placement=True,  # Ensureantan device placement on GPU
+        device_placement=True,  # Ensure device placement on GPU
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Loading SDXL pipeline with Accelerator...")
@@ -650,7 +698,7 @@ def generate_images_for_csv_rows(
     custom_pipeline.text_encoder_2.to(device)
     log_memory_usage()
 
-    logger.info("Initializing OpenAIUtils for prompt refinement...")
+    logger.info("Initializing OpenAIUtils for prompt summarization...")
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         config = yaml.safe_load(open("/home/iris/Documents/deep_learning/config/config.yaml", "r"))
@@ -661,53 +709,60 @@ def generate_images_for_csv_rows(
     tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
 
     theory_prompts = load_theory_prompts(yaml_path)
+    # Extract essence for each theory
+    theory_essences = {theory: extract_theory_essence(prompt) for theory, prompt in theory_prompts.items()}
     id_list = load_id_list(id_list_path)
 
-    row_prompts = load_csv_rows_by_ids(csv_path, id_list, chunk_size=50)
+    transcripts = load_transcripts_by_ids(transcript_dir, id_list)
     os.makedirs(temp_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     negative_prompt = (
-        "text, words, letters, abstract, low quality, blurry, distorted"
+        "text, words, letters, abstract, low quality, blurry, distorted, therapy settings, clinical environments"
     )
 
     prompt_cache = LRUCache(capacity=50)
-    i = 0
 
-    chunked_rows = [row_prompts[i:i + chunk_size] for i in range(0, len(row_prompts), chunk_size)]
-    for chunk_idx, chunk in enumerate(chunked_rows):
-        logger.info(f"Processing chunk {chunk_idx + 1}/{len(chunked_rows)} with {len(chunk)} rows...")
-        for row_id, txt_prompt in chunk:
-            logger.info(f"Processing row with ID: {row_id}")
+    chunked_transcripts = [transcripts[i:i + chunk_size] for i in range(0, len(transcripts), chunk_size)]
+    for chunk_idx, chunk in enumerate(chunked_transcripts):
+        logger.info(f"Processing chunk {chunk_idx + 1}/{len(chunked_transcripts)} with {len(chunk)} transcripts...")
+        for transcript_id, transcript_content in chunk:
+            logger.info(f"Processing transcript with ID: {transcript_id}")
             for theory, prompt_template in theory_prompts.items():
-                base_prompt = prompt_template.format(txt_prompt=txt_prompt)
-                prompt = f"An illustration representing {theory} themes in this person's life: {base_prompt}, with vibrant colors and expressive patterns"
+                # Summarize transcript using the theory's essence
+                theory_essence = theory_essences[theory]
+                summarized_content = summarize_transcript_with_openai(
+                    openai_util, transcript_content, theory, theory_essence, tokenizer, max_tokens=300
+                )
+                prompt = summarized_content  # Use summarized content directly
                 refined_prompt = prompt_cache.get(prompt)
                 if refined_prompt is None:
-                    logger.debug(f"Base prompt before refinement: {prompt[:100]}...")
+                    logger.debug(f"Base prompt before refinement: {prompt}...")
                     refined_prompt = refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=300)
                     prompt_cache.put(prompt, refined_prompt)
                     cleanup_memory()
                 else:
                     logger.debug(f"Using cached refined prompt for: {prompt}...")
                 logger.info(f"Generating image for theory: {theory}")
-                logger.info(f"Refined prompt: {refined_prompt}...")
+                logger.info(f"Refined prompt: {refined_prompt}")
+
                 try:
                     images = custom_pipeline(
                         prompt=refined_prompt,
-                        height=512,  # Further reduced resolution
+                        height=512,
                         width=512,
-                        num_inference_steps=50,  # Further reduced steps
-                        guidance_scale=10.0,
+                        num_inference_steps=20,
+                        guidance_scale=9.0,
                         negative_prompt=negative_prompt,
                         num_images_per_prompt=1,
                     )
-                    safe_id = str(row_id).replace("/", "_").replace("\\", "_")
+                    safe_id = str(transcript_id).replace("/", "_").replace("\\", "_")
                     temp_id_path = os.path.join(temp_dir, safe_id)
                     temp_image_path = os.path.join(temp_id_path, f"{safe_id}_{theory}.png")
                     output_path = os.path.join(output_dir, safe_id, f"{safe_id}_{theory}.png")
                     os.makedirs(temp_id_path, exist_ok=True)
                     images[0].save(temp_image_path)
-                    logger.info(f"Saved temporary image (128x128) to {temp_image_path}")
+                    logger.info(f"Saved temporary image (512x512) to {temp_image_path}")
                     upscale_image(temp_image_path, output_path, target_size=(1024, 1024))
                     try:
                         os.remove(temp_image_path)
@@ -717,7 +772,7 @@ def generate_images_for_csv_rows(
                     del images
                     cleanup_memory()
                 except Exception as e:
-                    logger.error(f"Failed to generate image for ID {row_id}, theory {theory}: {e}")
+                    logger.error(f"Failed to generate image for ID {transcript_id}, theory {theory}: {e}")
                     accelerator.free_memory()
                     cleanup_memory()
                 finally:
@@ -744,7 +799,7 @@ def generate_images_for_csv_rows(
     logger.info("Image generation complete.")
 
 if __name__ == "__main__":
-    csv_path = "/home/iris/Documents/deep_learning/data/input_csv/FILE_SUPERTOPIC_DESCRIPTION.csv"
+    transcript_dir = "/home/iris/Documents/deep_learning/data/transcripts/alexander_press_transcripts"
     yaml_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
     id_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
-    generate_images_for_csv_rows(csv_path, yaml_path, id_list_path)
+    generate_images_for_transcripts(transcript_dir, yaml_path, id_list_path)
