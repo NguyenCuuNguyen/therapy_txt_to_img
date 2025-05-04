@@ -321,6 +321,13 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         crops_coords_top_left = (0, 0)
         target_size = (image_size, image_size)
         add_time_ids = list(original_size + crops_coords_top_left + target_size)
+        # Pad add_time_ids to match refiner UNet's expected concatenated dimension
+        expected_total_dim = 2560  # From error
+        text_embeds_dim = self.pipeline_config["refiner_pooled_embed_dim"]  # 1280
+        current_time_ids_dim = len(add_time_ids)  # 6
+        required_dim = expected_total_dim - text_embeds_dim  # 2560 - 1280 = 1280
+        padding_dim = required_dim - current_time_ids_dim  # 1280 - 6 = 1274
+        add_time_ids.extend([0.0] * padding_dim)  # Pad with zeros
         add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype, device=device)
         add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
 
