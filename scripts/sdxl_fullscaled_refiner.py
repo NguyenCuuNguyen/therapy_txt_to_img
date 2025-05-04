@@ -183,22 +183,38 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
 
     def _encode_prompt_chunk(self, chunk, tokenizer, text_encoder, device, dtype):
         """Encode a single prompt chunk through a text encoder."""
-        with torch.no_grad():
-            inputs = tokenizer(
-                chunk,
-                padding="max_length",
-                max_length=tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            input_ids = inputs.input_ids.to(device)
-            outputs = text_encoder(input_ids, output_hidden_states=True, return_dict=True)
-            embeddings = outputs.hidden_states[-2]  # Shape: (batch_size=1, seq_len, embed_dim)
-            pooled = outputs.pooler_output if hasattr(outputs, "pooler_output") else outputs.last_hidden_state[:, 0]
-        logger.debug(f"Chunk embeddings shape: {embeddings.shape}, Pooled shape: {pooled.shape}, Embeddings dtype: {embeddings.dtype}")
-        log_tensor_stats(embeddings, "Chunk embeddings")
-        log_tensor_stats(pooled, "Pooled embeddings")
-        return embeddings.to(dtype), pooled.to(dtype)
+        try:
+            with torch.no_grad():
+                inputs = tokenizer(
+                    chunk,
+                    padding="max_length",
+                    max_length=tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                input_ids = inputs.input_ids.to(device)
+                logger.debug(f"Input IDs shape: {input_ids.shape}, dtype: {input_ids.dtype}, device: {input_ids.device}")
+                outputs = text_encoder(input_ids, output_hidden_states=True, return_dict=True)
+                embeddings = outputs.hidden_states[-2]  # Shape: (batch_size=1, seq_len, embed_dim)
+                pooled = outputs.pooler_output if hasattr(outputs, "pooler_output") else outputs.last_hidden_state[:, 0]
+                logger.debug(f"Raw embeddings shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}")
+                logger.debug(f"Raw pooled shape: {pooled.shape}, dtype: {pooled.dtype}, device: {pooled.device}")
+                # Ensure embeddings is 3D (batch_size, seq_len, embed_dim)
+                if embeddings.dim() == 2:
+                    embeddings = embeddings.unsqueeze(0)
+                # Ensure pooled is 2D (batch_size, embed_dim)
+                if pooled.dim() == 1:
+                    pooled = pooled.unsqueeze(0)
+                embeddings = embeddings.to(dtype)
+                pooled = pooled.to(dtype)
+                logger.debug(f"Processed embeddings shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}")
+                log_tensor_stats(embeddings, "Processed chunk embeddings")
+                logger.debug(f"Processed pooled shape: {pooled.shape}, dtype: {pooled.dtype}, device: {pooled.device}")
+                log_tensor_stats(pooled, "Processed pooled embeddings")
+                return embeddings, pooled
+        except Exception as e:
+            logger.error(f"Error in _encode_prompt_chunk for chunk '{chunk[:50]}...': {e}")
+            raise
 
     def encode_prompt(
         self, prompt, device, num_images_per_prompt=1, do_classifier_free_guidance=True, negative_prompt=None
@@ -247,125 +263,135 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         pooled_prompt_embeds_list = []
         negative_embeds_list = []
         negative_pooled_list = []
-        text_encoder_2_embeds_list = []  # New list for text_encoder_2 embeddings
-        text_encoder_2_negative_embeds_list = []  # New list for negative text_encoder_2 embeddings
+        text_encoder_2_embeds_list = []
+        text_encoder_2_negative_embeds_list = []
 
         tokenizers = [self.tokenizer, self.tokenizer_2]
         text_encoders = [self.text_encoder, self.text_encoder_2]
 
         for prompt_idx in range(batch_size):
-            prompt_chunk_embeds = []
-            prompt_chunk_pooled = []
-            text_encoder_2_chunk_embeds = []  # Store text_encoder_2 embeddings separately
-            chunks = prompt_chunks[prompt_idx % len(prompt_chunks)]
-            logger.debug(f"Processing prompt_idx: {prompt_idx}, Chunks: {len(chunks)}")
-            for chunk in chunks:
-                chunk_embeds_per_encoder = []
-                chunk_pooled_per_encoder = []
-                for tokenizer, text_encoder in zip(tokenizers, text_encoders):
-                    embeds, pooled = self._encode_prompt_chunk(chunk, tokenizer, text_encoder, device, dtype)
-                    if embeds.dim() == 2:
-                        embeds = embeds.unsqueeze(0)
-                    if pooled.dim() == 1:
-                        pooled = pooled.unsqueeze(0)
-                    chunk_embeds_per_encoder.append(embeds)
-                    chunk_pooled_per_encoder.append(pooled)
-                    if text_encoder == self.text_encoder_2:
-                        text_encoder_2_chunk_embeds.append(embeds)  # Store text_encoder_2 embeddings
-                chunk_embeds = torch.cat(chunk_embeds_per_encoder, dim=-1)
-                logger.debug(f"Chunk embeds shape after concat: {chunk_embeds.shape}, dtype: {chunk_embeds.dtype}")
-                prompt_chunk_embeds.append(chunk_embeds)
-                prompt_chunk_pooled.append(chunk_pooled_per_encoder[1])
-            if prompt_chunk_embeds:
-                prompt_embeds = torch.cat(prompt_chunk_embeds, dim=1)
-                text_encoder_2_embeds = torch.cat(text_encoder_2_chunk_embeds, dim=1)  # Concatenate text_encoder_2 embeddings
-            else:
-                embed_dim = self.text_encoder.config.hidden_size + self.text_encoder_2.config.hidden_size
-                prompt_embeds = torch.zeros((1, self.tokenizer.model_max_length, embed_dim), dtype=dtype, device=device)
-                text_encoder_2_embeds = torch.zeros((1, self.tokenizer_2.model_max_length, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
-            logger.debug(f"Prompt embeds shape: {prompt_embeds.shape}, dtype: {prompt_embeds.dtype}")
-            log_tensor_stats(prompt_embeds, "Prompt embeds")
-            prompt_embeds_list.append(prompt_embeds)
-            text_encoder_2_embeds_list.append(text_encoder_2_embeds)  # Add to list
-            pooled = prompt_chunk_pooled[-1] if prompt_chunk_pooled else torch.zeros((1, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
-            logger.debug(f"Pooled prompt shape: {pooled.shape}, dtype: {pooled.dtype}")
-            log_tensor_stats(pooled, "Pooled prompt")
-            pooled_prompt_embeds_list.append(pooled)
+            try:
+                prompt_chunk_embeds = []
+                prompt_chunk_pooled = []
+                text_encoder_2_chunk_embeds = []
+                chunks = prompt_chunks[prompt_idx % len(prompt_chunks)]
+                logger.debug(f"Processing prompt_idx: {prompt_idx}, Chunks: {len(chunks)}")
+                for chunk_idx, chunk in enumerate(chunks):
+                    chunk_embeds_per_encoder = []
+                    chunk_pooled_per_encoder = []
+                    for tokenizer_idx, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
+                        embeds, pooled = self._encode_prompt_chunk(chunk, tokenizer, text_encoder, device, dtype)
+                        logger.debug(f"Chunk {chunk_idx}, Encoder {tokenizer_idx} embeds shape: {embeds.shape}, dtype: {embeds.dtype}")
+                        logger.debug(f"Chunk {chunk_idx}, Encoder {tokenizer_idx} pooled shape: {pooled.shape}, dtype: {pooled.dtype}")
+                        chunk_embeds_per_encoder.append(embeds)
+                        chunk_pooled_per_encoder.append(pooled)
+                        if text_encoder == self.text_encoder_2:
+                            text_encoder_2_chunk_embeds.append(embeds)
+                    chunk_embeds = torch.cat(chunk_embeds_per_encoder, dim=-1)
+                    logger.debug(f"Chunk {chunk_idx} embeds after concat: {chunk_embeds.shape}, dtype: {chunk_embeds.dtype}")
+                    log_tensor_stats(chunk_embeds, f"Chunk {chunk_idx} concatenated embeds")
+                    prompt_chunk_embeds.append(chunk_embeds)
+                    prompt_chunk_pooled.append(chunk_pooled_per_encoder[1])
+                if prompt_chunk_embeds:
+                    prompt_embeds = torch.cat(prompt_chunk_embeds, dim=1)
+                    text_encoder_2_embeds = torch.cat(text_encoder_2_chunk_embeds, dim=1)
+                else:
+                    embed_dim = self.text_encoder.config.hidden_size + self.text_encoder_2.config.hidden_size
+                    prompt_embeds = torch.zeros((1, self.tokenizer.model_max_length, embed_dim), dtype=dtype, device=device)
+                    text_encoder_2_embeds = torch.zeros((1, self.tokenizer_2.model_max_length, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
+                logger.debug(f"Prompt embeds for prompt_idx {prompt_idx}: {prompt_embeds.shape}, dtype: {prompt_embeds.dtype}")
+                log_tensor_stats(prompt_embeds, f"Prompt embeds prompt_idx {prompt_idx}")
+                logger.debug(f"Text_encoder_2 embeds for prompt_idx {prompt_idx}: {text_encoder_2_embeds.shape}, dtype: {text_encoder_2_embeds.dtype}")
+                log_tensor_stats(text_encoder_2_embeds, f"Text_encoder_2 embeds prompt_idx {prompt_idx}")
+                prompt_embeds_list.append(prompt_embeds)
+                text_encoder_2_embeds_list.append(text_encoder_2_embeds)
+                pooled = prompt_chunk_pooled[-1] if prompt_chunk_pooled else torch.zeros((1, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
+                logger.debug(f"Pooled prompt for prompt_idx {prompt_idx}: {pooled.shape}, dtype: {pooled.dtype}")
+                log_tensor_stats(pooled, f"Pooled prompt prompt_idx {prompt_idx}")
+                pooled_prompt_embeds_list.append(pooled)
 
-            negative_chunk_embeds = []
-            negative_chunk_pooled = []
-            text_encoder_2_negative_chunk_embeds = []  # Store text_encoder_2 negative embeddings
-            neg_chunks = negative_chunks[prompt_idx % len(negative_chunks)]
-            logger.debug(f"Processing negative chunks: {len(neg_chunks)}")
-            for chunk in neg_chunks:
-                chunk_embeds_per_encoder = []
-                chunk_pooled_per_encoder = []
-                for tokenizer, text_encoder in zip(tokenizers, text_encoders):
-                    embeds, pooled = self._encode_prompt_chunk(chunk, tokenizer, text_encoder, device, dtype)
-                    if embeds.dim() == 2:
-                        embeds = embeds.unsqueeze(0)
-                    if pooled.dim() == 1:
-                        pooled = pooled.unsqueeze(0)
-                    chunk_embeds_per_encoder.append(embeds)
-                    chunk_pooled_per_encoder.append(pooled)
-                    if text_encoder == self.text_encoder_2:
-                        text_encoder_2_negative_chunk_embeds.append(embeds)
-                chunk_embeds = torch.cat(chunk_embeds_per_encoder, dim=-1)
-                logger.debug(f"Negative chunk embeds shape after concat: {chunk_embeds.shape}, dtype: {chunk_embeds.dtype}")
-                negative_chunk_embeds.append(chunk_embeds)
-                negative_chunk_pooled.append(chunk_pooled_per_encoder[1])
-            if negative_chunk_embeds:
-                negative_embeds = torch.cat(negative_chunk_embeds, dim=1)
-                text_encoder_2_negative_embeds = torch.cat(text_encoder_2_negative_chunk_embeds, dim=1)
-            else:
-                negative_embeds = torch.zeros_like(prompt_embeds)
-                text_encoder_2_negative_embeds = torch.zeros_like(text_encoder_2_embeds)
-            logger.debug(f"Negative embeds shape: {negative_embeds.shape}, dtype: {negative_embeds.dtype}")
-            log_tensor_stats(negative_embeds, "Negative embeds")
-            negative_embeds_list.append(negative_embeds)
-            text_encoder_2_negative_embeds_list.append(text_encoder_2_negative_embeds)
-            pooled = negative_chunk_pooled[-1] if negative_chunk_pooled else torch.zeros((1, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
-            logger.debug(f"Pooled negative shape: {pooled.shape}, dtype: {pooled.dtype}")
-            log_tensor_stats(pooled, "Pooled negative")
-            negative_pooled_list.append(pooled)
+                negative_chunk_embeds = []
+                negative_chunk_pooled = []
+                text_encoder_2_negative_chunk_embeds = []
+                neg_chunks = negative_chunks[prompt_idx % len(negative_chunks)]
+                logger.debug(f"Processing negative chunks for prompt_idx {prompt_idx}: {len(neg_chunks)}")
+                for chunk_idx, chunk in enumerate(neg_chunks):
+                    chunk_embeds_per_encoder = []
+                    chunk_pooled_per_encoder = []
+                    for tokenizer_idx, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
+                        embeds, pooled = self._encode_prompt_chunk(chunk, tokenizer, text_encoder, device, dtype)
+                        logger.debug(f"Negative chunk {chunk_idx}, Encoder {tokenizer_idx} embeds shape: {embeds.shape}, dtype: {embeds.dtype}")
+                        logger.debug(f"Negative chunk {chunk_idx}, Encoder {tokenizer_idx} pooled shape: {pooled.shape}, dtype: {pooled.dtype}")
+                        chunk_embeds_per_encoder.append(embeds)
+                        chunk_pooled_per_encoder.append(pooled)
+                        if text_encoder == self.text_encoder_2:
+                            text_encoder_2_negative_chunk_embeds.append(embeds)
+                    chunk_embeds = torch.cat(chunk_embeds_per_encoder, dim=-1)
+                    logger.debug(f"Negative chunk {chunk_idx} embeds after concat: {chunk_embeds.shape}, dtype: {chunk_embeds.dtype}")
+                    log_tensor_stats(chunk_embeds, f"Negative chunk {chunk_idx} concatenated embeds")
+                    negative_chunk_embeds.append(chunk_embeds)
+                    negative_chunk_pooled.append(chunk_pooled_per_encoder[1])
+                if negative_chunk_embeds:
+                    negative_embeds = torch.cat(negative_chunk_embeds, dim=1)
+                    text_encoder_2_negative_embeds = torch.cat(text_encoder_2_negative_chunk_embeds, dim=1)
+                else:
+                    negative_embeds = torch.zeros_like(prompt_embeds)
+                    text_encoder_2_negative_embeds = torch.zeros_like(text_encoder_2_embeds)
+                logger.debug(f"Negative embeds for prompt_idx {prompt_idx}: {negative_embeds.shape}, dtype: {negative_embeds.dtype}")
+                log_tensor_stats(negative_embeds, f"Negative embeds prompt_idx {prompt_idx}")
+                logger.debug(f"Text_encoder_2 negative embeds for prompt_idx {prompt_idx}: {text_encoder_2_negative_embeds.shape}, dtype: {text_encoder_2_negative_embeds.dtype}")
+                log_tensor_stats(text_encoder_2_negative_embeds, f"Text_encoder_2 negative embeds prompt_idx {prompt_idx}")
+                negative_embeds_list.append(negative_embeds)
+                text_encoder_2_negative_embeds_list.append(text_encoder_2_negative_embeds)
+                pooled = negative_chunk_pooled[-1] if negative_chunk_pooled else torch.zeros((1, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
+                logger.debug(f"Pooled negative for prompt_idx {prompt_idx}: {pooled.shape}, dtype: {pooled.dtype}")
+                log_tensor_stats(pooled, f"Pooled negative prompt_idx {prompt_idx}")
+                negative_pooled_list.append(pooled)
+            except Exception as e:
+                logger.error(f"Error processing prompt_idx {prompt_idx}: {e}")
+                raise
 
-        prompt_embeds = torch.stack(prompt_embeds_list).to(dtype).to(device)
-        text_encoder_2_embeds = torch.stack(text_encoder_2_embeds_list).to(dtype).to(device)  # Stack text_encoder_2 embeddings
-        if batch_size == 1:
-            prompt_embeds = prompt_embeds.squeeze(0)
-        logger.debug(f"Final prompt embeds shape: {prompt_embeds.shape}, dtype: {prompt_embeds.dtype}")
-        log_tensor_stats(prompt_embeds, "Final prompt embeds")
+        try:
+            prompt_embeds = torch.stack(prompt_embeds_list).to(dtype).to(device)
+            text_encoder_2_embeds = torch.stack(text_encoder_2_embeds_list).to(dtype).to(device)
+            if batch_size == 1:
+                prompt_embeds = prompt_embeds.squeeze(0)
+                text_encoder_2_embeds = text_encoder_2_embeds.squeeze(0)
+            logger.debug(f"Final prompt embeds shape: {prompt_embeds.shape}, dtype: {prompt_embeds.dtype}")
+            log_tensor_stats(prompt_embeds, "Final prompt embeds")
+            logger.debug(f"Final text_encoder_2 embeds shape: {text_encoder_2_embeds.shape}, dtype: {text_encoder_2_embeds.dtype}")
+            log_tensor_stats(text_encoder_2_embeds, "Final text_encoder_2 embeds")
 
-        pooled_prompt_embeds = torch.stack(pooled_prompt_embeds_list).to(dtype).to(device)
-        if batch_size == 1:
-            pooled_prompt_embeds = pooled_prompt_embeds.squeeze(0)
-        logger.debug(f"Final pooled prompt embeds shape: {pooled_prompt_embeds.shape}, dtype: {pooled_prompt_embeds.dtype}")
-        log_tensor_stats(pooled_prompt_embeds, "Final pooled prompt embeds")
+            pooled_prompt_embeds = torch.stack(pooled_prompt_embeds_list).to(dtype).to(device)
+            if batch_size == 1:
+                pooled_prompt_embeds = pooled_prompt_embeds.squeeze(0)
+            logger.debug(f"Final pooled prompt embeds shape: {pooled_prompt_embeds.shape}, dtype: {pooled_prompt_embeds.dtype}")
+            log_tensor_stats(pooled_prompt_embeds, "Final pooled prompt embeds")
 
-        negative_embeds = torch.stack(negative_embeds_list).to(dtype).to(device)
-        if batch_size == 1:
-            negative_embeds = negative_embeds.squeeze(0)
-        logger.debug(f"Final negative embeds shape: {negative_embeds.shape}, dtype: {negative_embeds.dtype}")
-        log_tensor_stats(negative_embeds, "Final negative embeds")
+            negative_embeds = torch.stack(negative_embeds_list).to(dtype).to(device)
+            text_encoder_2_negative_embeds = torch.stack(text_encoder_2_negative_embeds_list).to(dtype).to(device)
+            if batch_size == 1:
+                negative_embeds = negative_embeds.squeeze(0)
+                text_encoder_2_negative_embeds = text_encoder_2_negative_embeds.squeeze(0)
+            logger.debug(f"Final negative embeds shape: {negative_embeds.shape}, dtype: {negative_embeds.dtype}")
+            log_tensor_stats(negative_embeds, "Final negative embeds")
+            logger.debug(f"Final text_encoder_2 negative embeds shape: {text_encoder_2_negative_embeds.shape}, dtype: {text_encoder_2_negative_embeds.dtype}")
+            log_tensor_stats(text_encoder_2_negative_embeds, "Final text_encoder_2 negative embeds")
 
-        negative_pooled_embeds = torch.stack(negative_pooled_list).to(dtype).to(device)
-        text_encoder_2_negative_embeds = torch.stack(text_encoder_2_negative_embeds_list).to(dtype).to(device)
-        if batch_size == 1:
-            negative_pooled_embeds = negative_pooled_embeds.squeeze(0)
-            text_encoder_2_negative_embeds = text_encoder_2_negative_embeds.squeeze(0)
-        logger.debug(f"Final negative embeds shape: {negative_embeds.shape}, dtype: {negative_embeds.dtype}")
-        log_tensor_stats(negative_embeds, "Final negative embeds")
-        logger.debug(f"Final text_encoder_2 negative embeds shape: {text_encoder_2_negative_embeds.shape}, dtype: {text_encoder_2_negative_embeds.dtype}")
-        log_tensor_stats(text_encoder_2_negative_embeds, "Final text_encoder_2 negative embeds")
-
-        if do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_embeds, prompt_embeds], dim=0).to(device)
-            text_encoder_2_embeds = torch.cat([text_encoder_2_negative_embeds, text_encoder_2_embeds], dim=0).to(device)
-            logger.debug(f"After guidance, prompt_embeds shape: {prompt_embeds.shape}, dtype: {prompt_embeds.dtype}")
-            log_tensor_stats(prompt_embeds, "Prompt embeds after guidance")
-            pooled_prompt_embeds = torch.cat([negative_pooled_embeds, pooled_prompt_embeds], dim=0).to(device)
-            logger.debug(f"After guidance, pooled_prompt_embeds shape: {pooled_prompt_embeds.shape}, dtype: {pooled_prompt_embeds.dtype}")
-            log_tensor_stats(pooled_prompt_embeds, "Pooled prompt embeds after guidance")
+            if do_classifier_free_guidance:
+                prompt_embeds = torch.cat([negative_embeds, prompt_embeds], dim=0).to(device)
+                text_encoder_2_embeds = torch.cat([text_encoder_2_negative_embeds, text_encoder_2_embeds], dim=0).to(device)
+                negative_pooled_embeds = negative_pooled_list[-1] if negative_pooled_list else torch.zeros((1, self.text_encoder_2.config.hidden_size), dtype=dtype, device=device)
+                pooled_prompt_embeds = torch.cat([negative_pooled_embeds, pooled_prompt_embeds], dim=0).to(device)
+                logger.debug(f"After guidance, prompt_embeds shape: {prompt_embeds.shape}, dtype: {prompt_embeds.dtype}")
+                log_tensor_stats(prompt_embeds, "Prompt embeds after guidance")
+                logger.debug(f"After guidance, text_encoder_2_embeds shape: {text_encoder_2_embeds.shape}, dtype: {text_encoder_2_embeds.dtype}")
+                log_tensor_stats(text_encoder_2_embeds, "Text_encoder_2 embeds after guidance")
+                logger.debug(f"After guidance, pooled_prompt_embeds shape: {pooled_prompt_embeds.shape}, dtype: {pooled_prompt_embeds.dtype}")
+                log_tensor_stats(pooled_prompt_embeds, "Pooled prompt embeds after guidance")
+        except Exception as e:
+            logger.error(f"Error in final stacking or concatenation: {e}")
+            raise
 
         log_memory_usage()
         return prompt_embeds, {"text_embeds": pooled_prompt_embeds}
@@ -423,10 +449,14 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         self.text_encoder.to(device, dtype=dtype)
         self.text_encoder_2.to(device, dtype=dtype)
 
-        with torch.no_grad():
-            prompt_embeds, added_cond_kwargs = self.encode_prompt(
-                prompt, device, num_images_per_prompt, guidance_scale > 1.0, negative_prompt
-            )
+        try:
+            with torch.no_grad():
+                prompt_embeds, added_cond_kwargs = self.encode_prompt(
+                    prompt, device, num_images_per_prompt, guidance_scale > 1.0, negative_prompt
+                )
+        except Exception as e:
+            logger.error(f"Error in encode_prompt: {e}")
+            raise
 
         # Offload text encoders to CPU
         self.text_encoder.to("cpu")
@@ -437,35 +467,48 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         num_base_steps = int(num_inference_steps * denoising_end)
         num_refiner_steps = num_inference_steps - num_base_steps
 
-        self.scheduler.set_timesteps(num_base_steps, device=device)
-        timesteps = self.scheduler.timesteps
+        try:
+            self.scheduler.set_timesteps(num_base_steps, device=device)
+            timesteps = self.scheduler.timesteps
+        except Exception as e:
+            logger.error(f"Error setting scheduler timesteps: {e}")
+            raise
 
-        latents = self.prepare_latents(
-            batch_size,
-            self.unet.config.in_channels,
-            height,
-            width,
-            dtype,
-            device,
-            None,
-        ).to(device, dtype=dtype)
-        # Explicitly ensure 4D tensor
-        if latents.dim() == 3:
-            latents = latents.unsqueeze(0)
-        logger.debug(f"Latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
-        log_tensor_stats(latents, "Initial latents")
-        log_memory_usage()
+        try:
+            latents = self.prepare_latents(
+                batch_size,
+                self.unet.config.in_channels,
+                height,
+                width,
+                dtype,
+                device,
+                None,
+            )
+            logger.debug(f"Raw latents shape from prepare_latents: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+            log_tensor_stats(latents, "Raw latents from prepare_latents")
+            # Explicitly ensure 4D tensor
+            if latents.dim() == 3:
+                latents = latents.unsqueeze(0)
+            latents = latents.to(device, dtype=dtype)
+            logger.debug(f"Latents shape after initialization: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+            log_tensor_stats(latents, "Initial latents")
+        except Exception as e:
+            logger.error(f"Error in prepare_latents: {e}")
+            raise
 
-        add_time_ids = self._get_add_time_ids(
-            (height, width), (0, 0), (height, width), dtype=dtype
-        ).to(device)
-        add_time_ids = add_time_ids.repeat(batch_size, 1)
-        if guidance_scale > 1.0:
-            add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(device)
-        logger.debug(f"add_time_ids shape: {add_time_ids.shape}, dtype: {add_time_ids.dtype}, device: {add_time_ids.device}")
-        log_tensor_stats(add_time_ids, "add_time_ids")
-
-        added_cond_kwargs["time_ids"] = add_time_ids.to(device, dtype=dtype)
+        try:
+            add_time_ids = self._get_add_time_ids(
+                (height, width), (0, 0), (height, width), dtype=dtype
+            ).to(device)
+            add_time_ids = add_time_ids.repeat(batch_size, 1)
+            if guidance_scale > 1.0:
+                add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(device)
+            logger.debug(f"add_time_ids shape: {add_time_ids.shape}, dtype: {add_time_ids.dtype}, device: {add_time_ids.device}")
+            log_tensor_stats(add_time_ids, "add_time_ids")
+            added_cond_kwargs["time_ids"] = add_time_ids.to(device, dtype=dtype)
+        except Exception as e:
+            logger.error(f"Error in _get_add_time_ids: {e}")
+            raise
 
         # Move prompt_embeds and added_cond_kwargs to CPU initially
         prompt_embeds_cpu = prompt_embeds.to("cpu")
@@ -475,53 +518,62 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
 
         # Base pipeline inference
         for t in timesteps:
-            # Reload prompt_embeds and added_cond_kwargs to GPU
-            prompt_embeds = prompt_embeds_cpu.to(device, dtype=dtype)
-            added_cond_kwargs = {k: v.to(device, dtype=dtype) for k, v in added_cond_kwargs_cpu.items()}
+            try:
+                # Reload prompt_embeds and added_cond_kwargs to GPU
+                prompt_embeds = prompt_embeds_cpu.to(device, dtype=dtype)
+                added_cond_kwargs = {k: v.to(device, dtype=dtype) for k, v in added_cond_kwargs_cpu.items()}
 
-            latent_model_input = torch.cat([latents] * 2).to(device, dtype=dtype) if guidance_scale > 1.0 else latents
-            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t).to(device, dtype=dtype)
-            logger.debug(f"latent_model_input shape: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
-            log_tensor_stats(latent_model_input, "latent_model_input")
+                # Ensure latents is 4D before processing
+                if latents.dim() == 3:
+                    latents = latents.unsqueeze(0)
+                logger.debug(f"Latents shape before CFG: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+                log_tensor_stats(latents, "Latents before CFG")
+                latent_model_input = torch.cat([latents] * 2).to(device, dtype=dtype) if guidance_scale > 1.0 else latents
+                logger.debug(f"Latent_model_input shape after CFG: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
+                log_tensor_stats(latent_model_input, "Latent_model_input after CFG")
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t).to(device, dtype=dtype)
+                if latent_model_input.dim() == 3:
+                    latent_model_input = latent_model_input.unsqueeze(0)
+                logger.debug(f"Latent_model_input shape after scale_model_input: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
+                log_tensor_stats(latent_model_input, "Latent_model_input after scale_model_input")
 
-            cleanup_memory()
+                with torch.no_grad():
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        added_cond_kwargs=added_cond_kwargs,
+                    ).sample
+                logger.debug(f"Noise_pred shape after UNet: {noise_pred.shape}, dtype: {noise_pred.dtype}, device: {noise_pred.device}")
+                log_tensor_stats(noise_pred, "Noise_pred after UNet")
 
-            with torch.no_grad():
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs,
-                ).sample
-            logger.debug(f"noise_pred shape: {noise_pred.shape}, dtype: {noise_pred.dtype}, device: {noise_pred.device}")
-            log_tensor_stats(noise_pred, "noise_pred")
-            log_memory_usage()
+                if guidance_scale > 1.0:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond).to(device, dtype=dtype)
+                    logger.debug(f"Noise_pred shape after guidance: {noise_pred.shape}, dtype: {noise_pred.dtype}, device: {noise_pred.device}")
+                    log_tensor_stats(noise_pred, "Noise_pred after guidance")
 
-            # Move prompt_embeds and added_cond_kwargs back to CPU
-            prompt_embeds = prompt_embeds.to("cpu")
-            added_cond_kwargs = {k: v.to("cpu") for k, v in added_cond_kwargs.items()}
+                noise_pred = noise_pred.to(device, dtype=dtype)
+                latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+                if latents.dim() == 3:
+                    latents = latents.unsqueeze(0)
+                latents = latents.to(device, dtype=dtype)
+                logger.debug(f"Latents shape after scheduler step: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+                log_tensor_stats(latents, "Latents after scheduler step")
 
-            # Move latent_model_input to CPU
-            latent_model_input = latent_model_input.to("cpu")
-            cleanup_memory()
-
-            if guidance_scale > 1.0:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond).to(device, dtype=dtype)
-                log_tensor_stats(noise_pred, "noise_pred after guidance")
-
-            noise_pred = noise_pred.to(device, dtype=dtype)
-            latents = self.scheduler.step(noise_pred, t, latents).prev_sample.to(device, dtype=dtype)
-            # Ensure latents is 4D
-            if latents.dim() == 3:
-                latents = latents.unsqueeze(0)
-            logger.debug(f"Updated latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
-            log_tensor_stats(latents, "Updated latents")
-
-            # Move noise_pred to CPU
-            noise_pred = noise_pred.to("cpu")
-            del latent_model_input, noise_pred
-            cleanup_memory()
+                cleanup_memory()
+            except Exception as e:
+                logger.error(f"Error in base pipeline loop at timestep {t}: {e}")
+                raise
+            finally:
+                # Move tensors to CPU to free GPU memory
+                prompt_embeds = prompt_embeds.to("cpu")
+                added_cond_kwargs = {k: v.to("cpu") for k, v in added_cond_kwargs.items()}
+                if 'latent_model_input' in locals():
+                    latent_model_input = latent_model_input.to("cpu")
+                if 'noise_pred' in locals():
+                    noise_pred = noise_pred.to("cpu")
+                cleanup_memory()
 
         # Offload base pipeline components to CPU
         self.unet.to("cpu")
@@ -529,132 +581,89 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         cleanup_memory()
 
         if refiner is not None and denoising_end < 1.0:
-            # Prepare refiner
-            refiner.unet.to(device, dtype=dtype)
-            refiner.unet.enable_gradient_checkpointing()
-            refiner.unet.eval()
-            refiner.scheduler.set_timesteps(num_refiner_steps, device=device)
-            refiner_timesteps = refiner.scheduler.timesteps
+            logger.info("Starting refiner pipeline...")
+            # Convert latents to image for img2img pipeline
+            try:
+                # Ensure refiner components are on GPU with correct dtype
+                refiner.unet.to(device, dtype=dtype)
+                refiner.vae.to(device, dtype=dtype)
+                if refiner.text_encoder is not None:
+                    refiner.text_encoder.to(device, dtype=dtype)
+                if refiner.text_encoder_2 is not None:
+                    refiner.text_encoder_2.to(device, dtype=dtype)
+                logger.debug(f"Refiner components moved to device: {device}, dtype: {dtype}")
 
-            """ensures that the refiner uses embeddings directly from its own text_encoder_2, avoiding any dimension mismatch. The refiner's UNet expects a cross_attention_dim of 1280, so re-encoding the prompt with the refiner's tokenizer and text encoder ensures compatibility."""
-            # Use trimmed base embeddings for refiner (1280 dimensions from text_encoder_2)
-            # Extract only text_encoder_2 embeddings (last 2048 dimensions, then ensure compatibility)
-            refiner_prompt_embeds = added_cond_kwargs_cpu["text_encoder_2_embeds"].to(device, dtype=dtype)
-            # If refiner UNet expects 1280, ensure the embeddings are projected or sliced correctly
-            if refiner.unet.config.cross_attention_dim != 2048:
-                logger.warning(f"Refiner UNet expects cross_attention_dim={refiner.unet.config.cross_attention_dim}, adjusting embeddings")
-                # Assuming text_encoder_2 embeddings need to match 1280, we need to re-encode or project
-                # For simplicity, re-encode the prompt using refiner's text_encoder_2
+                if latents.dim() == 3:
+                    latents = latents.unsqueeze(0)
+                logger.debug(f"Latents shape before VAE decode: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+                log_tensor_stats(latents, "Latents before VAE decode")
+                latents = (1 / self.vae.config.scaling_factor * latents).to(device, dtype=dtype)
                 with torch.no_grad():
-                    inputs = refiner.tokenizer_2(
-                        prompt,
-                        padding="max_length",
-                        max_length=refiner.tokenizer_2.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
+                    image = self.vae.decode(latents).sample
+                logger.debug(f"VAE decoded image shape: {image.shape}, dtype: {image.dtype}, device: {image.device}")
+                log_tensor_stats(image, "VAE decoded image")
+                image = (image / 2 + 0.5).clamp(0, 1)
+                log_tensor_stats(image, "Normalized image")
+
+                # Convert to tensor for refiner, ensuring FP16 and GPU
+                image_tensor = torch.from_numpy(np.array(image)).permute(2, 0, 1).unsqueeze(0).to(device, dtype=dtype)
+                logger.debug(f"Image tensor for refiner: shape={image_tensor.shape}, dtype={image_tensor.dtype}, device={image_tensor.device}")
+                log_tensor_stats(image_tensor, "Image tensor for refiner")
+
+                # Call refiner pipeline with tensor input
+                with torch.no_grad():
+                    refiner_output = refiner(
+                        prompt=prompt,
+                        image=image_tensor,
+                        num_inference_steps=num_refiner_steps,
+                        denoising_start=1.0 - denoising_end,
+                        guidance_scale=guidance_scale,
+                        negative_prompt=negative_prompt,
+                        output_type="pil",
                     )
-                    input_ids = inputs.input_ids.to(device)
-                    refiner_outputs = refiner.text_encoder_2(input_ids, output_hidden_states=True, return_dict=True)
-                    refiner_prompt_embeds = refiner_outputs.hidden_states[-2].to(dtype=dtype)  # Shape: (batch_size, seq_len, 1280)
-                    if guidance_scale > 1.0:
-                        neg_inputs = refiner.tokenizer_2(
-                            negative_prompt or "",
-                            padding="max_length",
-                            max_length=refiner.tokenizer_2.model_max_length,
-                            truncation=True,
-                            return_tensors="pt",
-                        )
-                        neg_input_ids = neg_inputs.input_ids.to(device)
-                        neg_outputs = refiner.text_encoder_2(neg_input_ids, output_hidden_states=True, return_dict=True)
-                        neg_embeds = neg_outputs.hidden_states[-2].to(dtype=dtype)
-                        refiner_prompt_embeds = torch.cat([neg_embeds, refiner_prompt_embeds], dim=0)
-
-            refiner_added_cond_kwargs = {k: v.to(device, dtype=dtype) for k, v in added_cond_kwargs_cpu.items()}
-            logger.debug(f"Refiner prompt embeds shape: {refiner_prompt_embeds.shape}, dtype: {refiner_prompt_embeds.dtype}, device: {refiner_prompt_embeds.device}")
-            log_tensor_stats(refiner_prompt_embeds, "Refiner prompt embeds")
-
-            logger.info(f"Refiner UNet config: cross_attention_dim={refiner.unet.config.cross_attention_dim}")
-            # Refiner inference
-            for t in refiner_timesteps:
-                # Reload refiner prompt_embeds and added_cond_kwargs to GPU
-                prompt_embeds = refiner_prompt_embeds.to(device, dtype=dtype)
-                added_cond_kwargs = {k: v.to(device, dtype=dtype) for k, v in refiner_added_cond_kwargs.items()}
-                # Ensure latents is 4D
-                if latents.dim() == 3:
-                    latents = latents.unsqueeze(0)
-                logger.debug(f"Latents shape before CFG: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
-                latent_model_input = torch.cat([latents] * 2).to(device, dtype=dtype) if guidance_scale > 1.0 else latents
-                latent_model_input = refiner.scheduler.scale_model_input(latent_model_input, t).to(device, dtype=dtype)
-                # Ensure latent_model_input is 4D
-                if latent_model_input.dim() == 3:
-                    latent_model_input = latent_model_input.unsqueeze(0)
-                logger.debug(f"Latent_model_input shape after scale_model_input: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
-                
-                logger.debug(f"Refiner latent_model_input shape: {latent_model_input.shape}, dtype: {latent_model_input.dtype}, device: {latent_model_input.device}")
-                log_tensor_stats(latent_model_input, "Refiner latent_model_input")
-
-                cleanup_memory()
-
-                with torch.no_grad():
-                    noise_pred = refiner.unet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states=prompt_embeds,  # Use correctly shaped embeds
-                        added_cond_kwargs=added_cond_kwargs,
-                    ).sample
-                logger.debug(f"Refiner noise_pred shape: {noise_pred.shape}, dtype: {noise_pred.dtype}, device: {noise_pred.device}")
-                log_tensor_stats(noise_pred, "Refiner noise_pred")
+                images = refiner_output.images
                 log_memory_usage()
-
-                # Move prompt_embeds and added_cond_kwargs back to CPU
-                prompt_embeds = prompt_embeds.to("cpu")
-                added_cond_kwargs = {k: v.to("cpu") for k, v in added_cond_kwargs.items()}
-
-                latent_model_input = latent_model_input.to("cpu")
+                cleanup_memory()
+                return images
+            except Exception as e:
+                logger.error(f"Error in refiner pipeline: {e}")
+                raise
+            finally:
+                # Offload refiner components to CPU
+                refiner.unet.to("cpu")
+                refiner.vae.to("cpu")
+                if refiner.text_encoder is not None:
+                    refiner.text_encoder.to("cpu")
+                if refiner.text_encoder_2 is not None:
+                    refiner.text_encoder_2.to("cpu")
                 cleanup_memory()
 
-                if guidance_scale > 1.0:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond).to(device, dtype=dtype)
-                    log_tensor_stats(noise_pred, "Refiner noise_pred after guidance")
+        # Decode latents using VAE (only if refiner is not used)
+        try:
+            self.vae.to(device, dtype=dtype)
+            if latents.dim() == 3:
+                latents = latents.unsqueeze(0)
+            logger.debug(f"Latents before VAE decode shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+            log_tensor_stats(latents, "Latents before VAE decode")
+            latents = (1 / self.vae.config.scaling_factor * latents).to(device, dtype=dtype)
+            with torch.no_grad():
+                image = self.vae.decode(latents).sample
+            logger.debug(f"VAE output image shape: {image.shape}, dtype: {image.dtype}, device: {image.device}")
+            log_tensor_stats(image, "VAE output image")
+            image = (image / 2 + 0.5).clamp(0, 1)
+            log_tensor_stats(image, "Normalized image")
+            image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+            log_tensor_stats(torch.from_numpy(image), "Image before conversion to PIL")
 
-                noise_pred = noise_pred.to(device, dtype=dtype)
-                latents = refiner.scheduler.step(noise_pred, t, latents).prev_sample.to(device, dtype=dtype)
-                # Ensure latents is 4D
-                if latents.dim() == 3:
-                    latents = latents.unsqueeze(0)
-                
-                logger.debug(f"Refiner updated latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
-                log_tensor_stats(latents, "Refiner updated latents")
-
-                noise_pred = noise_pred.to("cpu")
-                del latent_model_input, noise_pred
-                cleanup_memory()
-
-            # Move refiner UNet to CPU
-            refiner.unet.to("cpu")
+            # Convert to PIL images
+            images = [Image.fromarray((img * 255).astype(np.uint8)) for img in image]
+            log_memory_usage()
+            del latents, image
             cleanup_memory()
-
-        # Decode latents using VAE
-        self.vae.to(device, dtype=dtype)
-        latents = (1 / self.vae.config.scaling_factor * latents).to(device, dtype=dtype)
-        logger.debug(f"Latents before VAE decode shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
-        log_tensor_stats(latents, "Latents before VAE decode")
-        with torch.no_grad():
-            image = self.vae.decode(latents).sample
-        logger.debug(f"VAE output image shape: {image.shape}, dtype: {image.dtype}, device: {image.device}")
-        log_tensor_stats(image, "VAE output image")
-        image = (image / 2 + 0.5).clamp(0, 1)
-        log_tensor_stats(image, "Normalized image")
-        image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-        log_tensor_stats(torch.from_numpy(image), "Image before conversion to PIL")
-
-        # Convert to PIL images
-        images = [Image.fromarray((img * 255).astype(np.uint8)) for img in image]
-        log_memory_usage()
-        del latents, image
-        cleanup_memory()
-        return images
+            return images
+        except Exception as e:
+            logger.error(f"Error in VAE decoding: {e}")
+            raise
 
 def load_theory_prompts(yaml_path):
     """Load theory prompts from YAML file."""
@@ -789,6 +798,7 @@ def generate_images_for_csv_rows(
         subfolder="scheduler",
         use_safetensors=True,
     )
+    # Prepare refiner with accelerator to ensure FP16 and device consistency
     refiner_pipeline = accelerator.prepare(refiner_pipeline)
 
     # Move base pipeline components to GPU
