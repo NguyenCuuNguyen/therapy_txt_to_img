@@ -29,6 +29,7 @@ import shutil
 
 # Suppress FutureWarning from diffusers (if applicable)
 warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers.models.transformers.transformer_2d")
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 try:
     from bitsandbytes.optim import AdamW8bit
@@ -191,15 +192,16 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         if projection_layer is None:
             self.logger.info(f"Initializing Projection Layer T5({t5_hidden_size}) -> SDXL UNet({unet_cross_attn_dim})")
             self.projection_layer = torch.nn.Linear(t5_hidden_size, unet_cross_attn_dim)
-            torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.001)
+            torch.nn.init.normal_(self.projection_layer.weight, mean=0.0, std=0.02)  # Changed from 0.001 to 0.02
             torch.nn.init.zeros_(self.projection_layer.bias)
         else:
             self.projection_layer = projection_layer
 
         if pool_projection_layer is None:
             self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL Base AddEmbs({base_pooled_embed_dim})")
+            self.logger.info(f"Initializing Pool Projection Layer T5({t5_hidden_size}) -> SDXL Base AddEmbs({base_pooled_embed_dim})")
             self.pool_projection_layer = torch.nn.Linear(t5_hidden_size, base_pooled_embed_dim)
-            torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.001)
+            torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.02)
             torch.nn.init.zeros_(self.pool_projection_layer.bias)
         else:
             self.pool_projection_layer = pool_projection_layer
@@ -208,8 +210,8 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             if refiner_pool_projection_layer is None:
                 self.logger.info(f"Initializing Refiner Pool Projection Layer T5({t5_hidden_size}) -> SDXL Refiner AddEmbs({refiner_pooled_embed_dim})")
                 self.refiner_pool_projection_layer = torch.nn.Linear(t5_hidden_size, refiner_pooled_embed_dim)
-                torch.nn.init.normal_(self.refiner_pool_projection_layer.weight, mean=0.0, std=0.001)
-                torch.nn.init.zeros_(self.refiner_pool_projection_layer.bias)
+                torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.02)
+                torch.nn.init.zeros_(self.pool_projection_layer.bias)
             else:
                 self.refiner_pool_projection_layer = refiner_pool_projection_layer
             if self.refiner_pool_projection_layer.out_features != refiner_pooled_embed_dim:
@@ -244,7 +246,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             latents = latents.to(device=device, dtype=dtype)
 
         latents = latents * self.scheduler.init_noise_sigma
-        latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
+        # latents = torch.nan_to_num(latents, nan=0.0, posinf=1.0, neginf=-1.0)
         self.logger.debug(f"Prepared latents with shape: {latents.shape}, device: {latents.device}, dtype: {latents.dtype}, mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}")
         return latents
 
@@ -268,26 +270,34 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 text_input_ids.to(device),
                 attention_mask=attention_mask.to(device)
             )[0]
-        encoder_hidden_states_t5 = torch.nan_to_num(encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
+        # encoder_hidden_states_t5 = torch.nan_to_num(encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
         self.logger.debug(f"T5 hidden states - mean: {encoder_hidden_states_t5.mean().item():.4f}, std: {encoder_hidden_states_t5.std().item():.4f}")
 
         if not hasattr(self, 'projection_layer') or self.projection_layer is None:
             raise AttributeError("projection_layer is required.")
         prompt_embeds = self.projection_layer(encoder_hidden_states_t5.to(dtype=self.projection_layer.weight.dtype))
-        prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        # prompt_embeds = torch.nan_to_num(prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
         self.logger.debug(f"Prompt embeds after projection - mean: {prompt_embeds.mean().item():.4f}, std: {prompt_embeds.std().item():.4f}")
+
 
         pooled_output_t5 = encoder_hidden_states_t5.mean(dim=1)
         if not hasattr(self, 'pool_projection_layer') or self.pool_projection_layer is None:
             raise AttributeError("pool_projection_layer is required.")
         base_text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
-        base_text_embeds = torch.nan_to_num(base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+        # base_text_embeds = torch.nan_to_num(base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
         self.logger.debug(f"Base text_embeds shape: {base_text_embeds.shape}, mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}")
+                
+        if torch.isnan(prompt_embeds).any() or torch.isinf(prompt_embeds).any():
+            self.logger.warning("NaN/Inf in prompt_embeds after projection.")
+        base_text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
+        self.logger.debug(f"Base text_embeds - mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}, min: {base_text_embeds.min().item():.4f}, max: {base_text_embeds.max().item():.4f}")
+        if torch.isnan(base_text_embeds).any() or torch.isinf(base_text_embeds).any():
+            self.logger.warning("NaN/Inf in base_text_embeds after projection.")
 
         refiner_text_embeds = None
         if self.refiner_unet is not None and self.refiner_pool_projection_layer is not None:
             refiner_text_embeds = self.refiner_pool_projection_layer(pooled_output_t5.to(dtype=self.refiner_pool_projection_layer.weight.dtype))
-            refiner_text_embeds = torch.nan_to_num(refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+            # refiner_text_embeds = torch.nan_to_num(refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
             expected_refiner_dim = self.pipeline_config["refiner_pooled_embed_dim"]
             if refiner_text_embeds.shape[-1] != expected_refiner_dim:
                 raise ValueError(f"refiner_text_embeds dimension {refiner_text_embeds.shape[-1]} does not match expected {expected_refiner_dim}")
@@ -317,19 +327,19 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 uncond_encoder_hidden_states_t5 = self.text_encoder(
                     uncond_input_ids.to(device), attention_mask=uncond_attention_mask.to(device)
                 )[0]
-            uncond_encoder_hidden_states_t5 = torch.nan_to_num(uncond_encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
+            # uncond_encoder_hidden_states_t5 = torch.nan_to_num(uncond_encoder_hidden_states_t5, nan=0.0, posinf=1.0, neginf=-1.0)
 
             uncond_prompt_embeds = self.projection_layer(uncond_encoder_hidden_states_t5.to(dtype=self.projection_layer.weight.dtype))
-            uncond_prompt_embeds = torch.nan_to_num(uncond_prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+            # uncond_prompt_embeds = torch.nan_to_num(uncond_prompt_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
 
             uncond_pooled_output_t5 = uncond_encoder_hidden_states_t5.mean(dim=1)
             uncond_base_text_embeds = self.pool_projection_layer(uncond_pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
-            uncond_base_text_embeds = torch.nan_to_num(uncond_base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+            # uncond_base_text_embeds = torch.nan_to_num(uncond_base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
 
             uncond_refiner_text_embeds = None
             if self.refiner_unet is not None and self.refiner_pool_projection_layer is not None:
                 uncond_refiner_text_embeds = self.refiner_pool_projection_layer(uncond_pooled_output_t5.to(dtype=self.refiner_pool_projection_layer.weight.dtype))
-                uncond_refiner_text_embeds = torch.nan_to_num(uncond_refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
+                # uncond_refiner_text_embeds = torch.nan_to_num(uncond_refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
                 if uncond_refiner_text_embeds.shape[-1] != expected_refiner_dim:
                     raise ValueError(f"uncond_refiner_text_embeds dimension {uncond_refiner_text_embeds.shape[-1]} does not match expected {expected_refiner_dim}")
 
@@ -346,6 +356,20 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
         }
         self.logger.debug(f"Prompt embeds shape: {prompt_embeds.shape}, Base text_embeds shape: {base_text_embeds.shape}, Refiner text_embeds shape: {refiner_text_embeds.shape if refiner_text_embeds is not None else 'None'}")
         return prompt_embeds, added_cond_kwargs
+    
+    def debug_latents_to_image(self, latents, step, debug_dir):
+        latents = latents.to(dtype=torch.float32, device=self.device)
+        self.vae.to(dtype=torch.float32, device=self.device)
+        latents_scaled = latents / self.vae.config.scaling_factor
+        with torch.no_grad():
+            image = self.vae.decode(latents_scaled).sample
+        image = (image / 2 + 0.5).clamp(0, 1)
+        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+        image_pil = self.numpy_to_pil(image)[0]
+        output_path = os.path.join(debug_dir, f"latent_debug_step_{step}.png")
+        image_pil.save(output_path)
+        self.logger.info(f"Saved latent debug image at step {step} to {output_path}")
+
 
     @torch.no_grad()
     def __call__(self, prompt, negative_prompt=None, num_inference_steps=50, guidance_scale=7.5, num_images_per_prompt=1, generator=None, output_type="pil", refiner_steps=10, height=None, width=None, latents=None, return_dict=True, debug_dir=None, **kwargs):
@@ -381,6 +405,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             latents,
         )
 
+
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -412,7 +437,9 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                     latents_path = os.path.join(debug_dir, f"latents_step_{i}.npy")
                     np.save(latents_path, latents_np)
                     self.logger.info(f"Saved latents at step {i} to {latents_path}, mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}")
+                    self.debug_latents_to_image(latents, i, "/home/iris/Documents/deep_learning/experiments/trained_sdxl_t5_refiner/debug")
 
+                
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
@@ -456,10 +483,11 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
 
         image = latents
         if output_type != "latent":
-            self.vae.to(dtype=torch.float32)
-            latents = latents.to(dtype=torch.float32)
+            self.vae.to(dtype=torch.float32, device=self.device)
+            latents = latents.to(dtype=torch.float32, device=self.device)
             self.logger.info(f"Latents before VAE decode - mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}, min: {latents.min().item():.4f}, max: {latents.max().item():.4f}")
-            latents = latents / self.vae_scale_factor
+            
+            latents = latents / self.vae.config.scaling_factor #typically 0.18215 for SDXL instead of self.vae_scale_factor 
             self.vae.to(device=latents.device)
             with torch.no_grad():
                 image = self.vae.decode(latents).sample
@@ -469,6 +497,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 image_path = os.path.join(debug_dir, "decoded_image.npy")
                 np.save(image_path, image_np)
                 self.logger.info(f"Saved decoded image to {image_path}")
+            # Normalize to [0, 1]
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
@@ -491,10 +520,11 @@ class FinetuneModel:
         self.accelerator = accelerator
         self.logger = logger_instance or get_logger(__name__)
         self.device = accelerator.device
-        if accelerator.mixed_precision == 'fp16':
-            self.dtype = torch.float16
-        elif accelerator.mixed_precision == 'bf16':
-            self.dtype = torch.bfloat16
+        # if accelerator.mixed_precision == 'fp16':
+        #     self.dtype = torch.float16
+
+        if accelerator.mixed_precision == 'no':
+            self.dtype = torch.float32
         else:
             self.dtype = torch.float32
         self.logger.info(f"Using dtype: {self.dtype} based on accelerator state.")
@@ -546,6 +576,7 @@ class FinetuneModel:
 
             self.logger.info("Loading Refiner UNet...")
             self.refiner_unet = UNet2DConditionModel.from_pretrained(refiner_model_id, subfolder="unet").to(self.device, dtype=self.dtype)
+            # self.refiner_unet = None
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -624,7 +655,7 @@ class FinetuneModel:
             self.unet.print_trainable_parameters()
             gc.collect()
             torch.cuda.empty_cache()
-
+            
         if apply_lora_refiner and self.refiner_unet:
             self.logger.info("Applying LoRA to refiner UNet...")
             self.refiner_unet = get_peft_model(self.refiner_unet, lora_config_unet)
@@ -753,6 +784,10 @@ class FinetuneModel:
         original_unet = self.pipeline.unet
         if use_pretrained:
             self.logger.info("Loading pre-trained UNet for validation image generation...")
+            # Move fine-tuned UNet to CPU to free GPU memory
+            self.pipeline.unet.to("cpu")
+            torch.cuda.empty_cache()
+            gc.collect()
             base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
             self.pipeline.unet = UNet2DConditionModel.from_pretrained(base_model_id, subfolder="unet").to(self.device, dtype=self.dtype)
             gc.collect()
@@ -762,18 +797,23 @@ class FinetuneModel:
             try:
                 generator = torch.Generator(device=self.device).manual_seed(42 + idx)
                 with torch.no_grad():
+                    # Move text encoder to GPU for prompt encoding
+                    self.text_encoder.to(self.device)
                     image = self.pipeline(
                         prompt=prompt,
                         negative_prompt="blurry, low quality, distorted",
                         num_inference_steps=50,
                         guidance_scale=7.5,
-                        refiner_steps=0,
+                        refiner_steps=10,
                         height=self.image_size,
                         width=self.image_size,
                         generator=generator,
                         output_type="pil",
                         debug_dir=debug_dir
                     ).images[0]
+                    # Move text encoder back to CPU
+                    self.text_encoder.to("cpu")
+                    torch.cuda.empty_cache()
                 suffix = "pretrained" if use_pretrained else "finetuned"
                 output_path = os.path.join(output_dir, f"val_image_epoch_{epoch}_prompt_{idx}_{suffix}.png")
                 image.save(output_path)
@@ -785,7 +825,9 @@ class FinetuneModel:
                 torch.cuda.empty_cache()
 
         if use_pretrained:
-            self.pipeline.unet = original_unet
+            # Move pretrained UNet to CPU and restore fine-tuned UNet
+            self.pipeline.unet.to("cpu")
+            self.pipeline.unet = original_unet.to(self.device, dtype=self.dtype)
             self.logger.info("Restored fine-tuned UNet after validation image generation.")
             gc.collect()
             torch.cuda.empty_cache()
@@ -820,6 +862,10 @@ class FinetuneModel:
                         if np.any(np.isnan(image_np)) or np.any(np.isinf(image_np)):
                             self.logger.warning(f"Validation: NaN/Inf in image {img_filename}. Skipping item.")
                             continue
+                        #Ensures input images are strictly in [0, 1] and free of NaN/Inf before VAE encoding.
+                        if np.any(image_np < 0) or np.any(image_np > 1):
+                            self.logger.warning(f"Image {img_filename} has values outside [0, 1]. Clamping.")
+                            image_np = np.clip(image_np, 0, 1)
                         image_tensor = torch.from_numpy(image_np).permute(2, 0, 1)
                         pixel_values_list.append(image_tensor)
                         valid_prompts.append(prompt)
@@ -836,20 +882,35 @@ class FinetuneModel:
                 prompts = valid_prompts
 
                 with torch.no_grad():
+                    # Move text encoder to GPU for prompt encoding
+                    self.text_encoder.to(self.device)
                     prompt_embeds, added_cond_kwargs = self.pipeline._encode_prompt(
                         prompts, self.device, 1, False
                     )
+                    # Move text encoder back to CPU to free GPU memory
+                    self.text_encoder.to("cpu")
+                    torch.cuda.empty_cache()
                     prompt_embeds = prompt_embeds.to(self.dtype)
                     for k, v in added_cond_kwargs.items():
                         added_cond_kwargs[k] = v.to(self.dtype)
 
                     pixel_values_norm = pixel_values * 2.0 - 1.0
                     pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)
+                    self.logger.debug(f"Pixel values norm - shape: {pixel_values_norm.shape}, dtype: {pixel_values_norm.dtype}, mean: {pixel_values_norm.mean().item():.4f}, std: {pixel_values_norm.std().item():.4f}, min: {pixel_values_norm.min().item():.4f}, max: {pixel_values_norm.max().item():.4f}")
+
+                    # Move VAE to GPU for encoding
+                    self.vae.to(self.device)
+                    self.logger.debug(f"VAE device before encoding: {next(self.vae.parameters()).device}, VAE dtype: {self.vae.dtype}")
                     vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
+                    # Move VAE back to CPU to free GPU memory
+                    self.vae.to("cpu")
+                    torch.cuda.empty_cache()
+
                     latents = vae_output.latent_dist.sample()
-                    latents = latents * self.pipeline.vae_scale_factor
+                    # latents = latents * self.pipeline.vae_scale_factor
+                    latents = latents * self.vae.config.scaling_factor
                     latents = torch.clamp(latents, -1e6, 1e6)
-                    latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
+                    # latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
                     latents = latents.to(self.dtype)
 
                     if torch.isnan(latents).any() or torch.isinf(latents).any():
@@ -859,7 +920,7 @@ class FinetuneModel:
                     noise = torch.randn_like(latents)
                     timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
                     noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
-                    noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
+                    # noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
 
                     model_pred = self.unet(
                         sample=noisy_latents,
@@ -870,7 +931,7 @@ class FinetuneModel:
                     if torch.isnan(model_pred).any() or torch.isinf(model_pred).any():
                         self.logger.warning("Validation: NaN/Inf in model_pred. Skipping batch.")
                         continue
-                    model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
+                    # model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
 
                     mse_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
                     if torch.isnan(mse_loss) or torch.isinf(mse_loss):
@@ -903,9 +964,9 @@ class FinetuneModel:
 
     def fine_tune(self, dataset_path, dataset, epochs=1, batch_size=1, learning_rate=1e-7, gradient_accumulation_steps=4, lora_r=8, lora_alpha=16, lora_dropout=0.1, validation_split=0.2, early_stopping_patience=2, generation_frequency=1, perceptual_loss_weight=0.1):
         self.logger.info(f"Requested learning rate: {learning_rate}")
-        if learning_rate > 1e-8:
+        if learning_rate > 5e-5:
             self.logger.warning(f"Capping learning rate at 1e-8 for stability.")
-            learning_rate = 1e-8
+            learning_rate = 5e-5
 
         try:
             dataset_size = len(dataset)
@@ -915,8 +976,8 @@ class FinetuneModel:
             val_dataset = Subset(dataset, val_indices)
             self.logger.info(f"Dataset split: {len(train_dataset)} training samples, {len(val_dataset)} validation samples")
 
-            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=False) #Eliminates GPU memory buffering for images
+            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=False)
             image_folder = os.path.join(os.path.dirname(dataset_path), "images") if dataset_path else "images"
 
             params_to_optimize = []
@@ -1073,6 +1134,8 @@ class FinetuneModel:
                         prompts = valid_prompts
 
                         with self.accelerator.accumulate(*prepared_models_tuple):
+                            # Move T5 to GPU for prompt encoding
+                            self.text_encoder.to(self.device)
                             with torch.amp.autocast(device_type='cuda', enabled=self.accelerator.mixed_precision in ['fp16', 'bf16']):
                                 prompt_embeds, added_cond_kwargs = self.pipeline._encode_prompt(
                                     prompts, self.device, 1, False
@@ -1080,6 +1143,10 @@ class FinetuneModel:
                                 prompt_embeds = prompt_embeds.to(self.dtype)
                                 for k, v in added_cond_kwargs.items():
                                     added_cond_kwargs[k] = v.to(self.dtype)
+
+                                # Move T5 to CPU after encoding
+                                self.text_encoder.to("cpu")
+                                torch.cuda.empty_cache()
 
                                 if torch.isnan(prompt_embeds).any() or torch.isinf(prompt_embeds).any():
                                     self.logger.warning(f"Train Step {step+1}: NaN/Inf in prompt_embeds. Skipping.")
@@ -1101,12 +1168,65 @@ class FinetuneModel:
                                 pixel_values_norm = pixel_values * 2.0 - 1.0
                                 pixel_values_norm = torch.clamp(pixel_values_norm, -1.0, 1.0)
                                 with torch.no_grad():
-                                    vae_output = self.vae.encode(pixel_values_norm.to(self.vae.dtype))
+                                    # Move VAE to GPU for encoding
+                                    self.vae.to(self.device)
+                                    pixel_values_norm = pixel_values_norm.to(torch.float32)
+                                    self.logger.debug(f"Pixel values norm - mean: {pixel_values_norm.mean().item():.4f}, std: {pixel_values_norm.std().item():.4f}, min: {pixel_values_norm.min().item():.4f}, max: {pixel_values_norm.max().item():.4f}")
+                                    if torch.isnan(pixel_values_norm).any() or torch.isinf(pixel_values_norm).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in pixel_values_norm. Skipping.")
+                                        self.optimizer.zero_grad()
+                                        continue
+
+                                    vae_output = self.vae.encode(pixel_values_norm.to(torch.float32))
+                                    self.logger.debug(f"latent_dist type: {type(vae_output.latent_dist)}, attributes: {dir(vae_output.latent_dist)}")
+                                    self.logger.debug(f"VAE output latent_dist mean: {vae_output.latent_dist.mean.mean().item():.4f}, std: {vae_output.latent_dist.std.mean().item():.4f}")
+
+                                    # Disable autocast for VAE encoding
+                                    """Forces the VAE encoding to run in float32, bypassing any float16 casting from the autocast context.
+                                        If this resolves the NaN/Inf, the issue is due to float16 precision in the VAE."""
+                                    with torch.cuda.amp.autocast(enabled=False):
+                                        vae_output = self.vae.encode(pixel_values_norm)
+                                    self.logger.debug(f"VAE output latent_dist mean: {vae_output.latent_dist.mean.mean().item():.4f}, std: {vae_output.latent_dist.std.mean().item():.4f}")
+
+                                    if torch.isnan(vae_output.latent_dist.mean).any() or torch.isinf(vae_output.latent_dist.mean).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in VAE latent_dist mean. Skipping.")
+                                        self.optimizer.zero_grad()
+                                        continue
+
                                     latents = vae_output.latent_dist.sample()
-                                    latents = latents * self.pipeline.vae_scale_factor
+                                    self.logger.debug(f"Latents after sampling - mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}, min: {latents.min().item():.4f}, max: {latents.max().item():.4f}")
+                                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after sampling. Skipping.")
+                                        self.optimizer.zero_grad()
+                                        continue
+
+                                    latents = torch.clamp(latents, -100, 100)  # Early clamping to prevent extreme values
+                                    latents = latents * self.vae.config.scaling_factor
+                                    self.logger.debug(f"Latents after scaling - mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}, min: {latents.min().item():.4f}, max: {latents.max().item():.4f}")
+                                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after scaling. Skipping.")
+                                        self.optimizer.zero_grad()
+                                        continue
+
                                     latents = torch.clamp(latents, -1e6, 1e6)
-                                    latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
-                                    latents = latents.to(self.dtype)
+                                    self.logger.debug(f"Latents after clamping - mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}, min: {latents.min().item():.4f}, max: {latents.max().item():.4f}")
+                                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after clamping. Skipping.")
+                                        self.optimizer.zero_grad()
+                                        continue
+
+                                    # latents = torch.nan_to_num(latents, nan=0.0, posinf=1e6, neginf=-1e6)
+                                    latents = latents.to(self.dtype) # Convert to bfloat16 only after clamping
+                                    self.logger.debug(f"Latents after type conversion - mean: {latents.mean().item():.4f}, std: {latents.std().item():.4f}, min: {latents.min().item():.4f}, max: {latents.max().item():.4f}")
+                                    if torch.isnan(latents).any() or torch.isinf(latents).any():
+                                        self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after type conversion. Skipping.")
+                                        self.optimizer.zero_grad()
+                                        continue
+
+                                    # Move VAE to CPU after encoding
+                                    self.vae.to("cpu")
+                                    torch.cuda.empty_cache()
+                                                    
                                 if torch.isnan(latents).any() or torch.isinf(latents).any():
                                     self.logger.warning(f"Train Step {step+1}: NaN/Inf in latents after clamping. Skipping.")
                                     self.optimizer.zero_grad()
@@ -1115,7 +1235,7 @@ class FinetuneModel:
                                 noise = torch.randn_like(latents)
                                 timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device).long()
                                 noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
-                                noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
+                                # noisy_latents = torch.nan_to_num(noisy_latents, nan=0.0, posinf=1.0, neginf=-1.0)
 
                                 model_pred = self.unet(
                                     sample=noisy_latents,
@@ -1127,7 +1247,7 @@ class FinetuneModel:
                                     self.logger.warning(f"Train Step {step+1}: NaN/Inf in base model_pred. Skipping.")
                                     self.optimizer.zero_grad()
                                     continue
-                                model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
+                                # model_pred = torch.nan_to_num(model_pred, nan=0.0, posinf=1.0, neginf=-1.0)
 
                                 mse_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
                                 if torch.isnan(mse_loss) or torch.isinf(mse_loss):
@@ -1142,7 +1262,7 @@ class FinetuneModel:
                             if self.accelerator.sync_gradients:
                                 valid_gradients = True
                                 try:
-                                    grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 1.0)
+                                    grad_norm = self.accelerator.clip_grad_norm_(params_to_optimize, 5.0)
                                     if torch.isnan(grad_norm) or torch.isinf(grad_norm):
                                         self.logger.warning(f"Train Step {step+1}: NaN/Inf gradient norm ({grad_norm.item()}). Skipping step.")
                                         valid_gradients = False
@@ -1279,8 +1399,8 @@ class FinetuneModel:
 
 def run_finetune(config_path, hyperparam_config_path):
     accelerator = Accelerator(
-        gradient_accumulation_steps=4,  # Reduced to 4 to minimize numerical issues in FP16 (fallback if BF16 is unsupported)
-        mixed_precision='bf16',  # Switch to BF16 for better numerical stability (requires compatible hardware)
+        gradient_accumulation_steps=16,  # Reduced to 4 to minimize numerical issues in FP16 (fallback if BF16 is unsupported)
+        mixed_precision= "no", #'fp16',  # in pretrained validation to prevent compatibility ikssue. previously Switch to BF16 for better numerical stability (requires compatible hardware)
         log_with='tensorboard' if 'tensorboard' in globals() else None,
         project_dir=os.path.join(
             "/home/iris/Documents/deep_learning/experiments/trained_sdxl_t5_refiner", "logs"
