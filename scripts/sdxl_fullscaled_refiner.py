@@ -125,6 +125,27 @@ class LRUCache:
         if len(self.cache) > self.capacity:
             self.cache.popitem(last=False)
 
+# Custom refiner pipeline for debugging
+class DebugStableDiffusionXLImg2ImgPipeline(StableDiffusionXLImg2ImgPipeline):
+    def __call__(self, *args, **kwargs):
+        logger.debug("Entering refiner pipeline __call__")
+        # Log input arguments
+        logger.debug(f"Refiner input args: {args}")
+        logger.debug(f"Refiner input kwargs: {kwargs}")
+
+        # Call parent method and capture intermediate states
+        result = super().__call__(*args, **kwargs)
+
+        # Log prompt embeddings (requires accessing internal state)
+        if hasattr(self, "text_encoder") and self.text_encoder is not None:
+            logger.debug(f"Refiner text_encoder device: {next(self.text_encoder.parameters()).device}, dtype: {next(self.text_encoder.parameters()).dtype}")
+        if hasattr(self, "text_encoder_2") and self.text_encoder_2 is not None:
+            logger.debug(f"Refiner text_encoder_2 device: {next(self.text_encoder_2.parameters()).device}, dtype: {next(self.text_encoder_2.parameters()).dtype}")
+        logger.debug(f"Refiner unet device: {next(self.unet.parameters()).device}, dtype: {next(self.unet.parameters()).dtype}")
+        logger.debug(f"Refiner vae device: {next(self.vae.parameters()).device}, dtype: {next(self.vae.parameters()).dtype}")
+
+        return result
+
 class SDXLChunkingPipeline(StableDiffusionXLPipeline):
     def __init__(self, vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, unet, scheduler):
         super().__init__(
@@ -221,7 +242,7 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
     ):
         """Custom prompt encoding to handle chunking and concatenation."""
         batch_size = num_images_per_prompt
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32  # Use FP16 on GPU
+        dtype = torch.float32  # Use FP32 exclusively
         logger.debug(f"Batch size: {batch_size}, Prompt: {prompt[:100]}..., Negative prompt: {negative_prompt[:100]}...")
         log_memory_usage()
 
@@ -440,7 +461,7 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         """Generate images with chunked prompt processing and optional refiner."""
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         batch_size = num_images_per_prompt
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32  # Use FP16 on GPU
+        dtype = torch.float32  # Use FP32 exclusively
         log_memory_usage()
 
         # Ensure base pipeline components are on the GPU
@@ -448,6 +469,11 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         self.vae.to(device, dtype=dtype)
         self.text_encoder.to(device, dtype=dtype)
         self.text_encoder_2.to(device, dtype=dtype)
+        logger.debug(f"Base pipeline components moved to device: {device}, dtype: {dtype}")
+        logger.debug(f"Base unet device: {next(self.unet.parameters()).device}, dtype: {next(self.unet.parameters()).dtype}")
+        logger.debug(f"Base vae device: {next(self.vae.parameters()).device}, dtype: {next(self.vae.parameters()).dtype}")
+        logger.debug(f"Base text_encoder device: {next(self.text_encoder.parameters()).device}, dtype: {next(self.text_encoder.parameters()).dtype}")
+        logger.debug(f"Base text_encoder_2 device: {next(self.text_encoder_2.parameters()).device}, dtype: {next(self.text_encoder_2.parameters()).dtype}")
 
         try:
             with torch.no_grad():
@@ -592,6 +618,15 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
                 if refiner.text_encoder_2 is not None:
                     refiner.text_encoder_2.to(device, dtype=dtype)
                 logger.debug(f"Refiner components moved to device: {device}, dtype: {dtype}")
+                logger.debug(f"Refiner unet device: {next(refiner.unet.parameters()).device}, dtype: {next(refiner.unet.parameters()).dtype}")
+                logger.debug(f"Refiner vae device: {next(refiner.vae.parameters()).device}, dtype: {next(refiner.vae.parameters()).dtype}")
+                if refiner.text_encoder is not None:
+                    logger.debug(f"Refiner text_encoder device: {next(refiner.text_encoder.parameters()).device}, dtype: {next(refiner.text_encoder.parameters()).dtype}")
+                if refiner.text_encoder_2 is not None:
+                    logger.debug(f"Refiner text_encoder_2 device: {next(refiner.text_encoder_2.parameters()).device}, dtype: {next(refiner.text_encoder_2.parameters()).dtype}")
+
+                # Synchronize GPU operations
+                torch.cuda.synchronize()
 
                 if latents.dim() == 3:
                     latents = latents.unsqueeze(0)
@@ -599,22 +634,22 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
                 log_tensor_stats(latents, "Latents before VAE decode")
                 latents = (1 / self.vae.config.scaling_factor * latents).to(device, dtype=dtype)
                 with torch.no_grad():
-                    image = self.vae.decode(latents).sample
+                    image = refiner.vae.decode(latents).sample
+                    #image = self.vae.decode(latents).sample
                 logger.debug(f"VAE decoded image shape: {image.shape}, dtype: {image.dtype}, device: {image.device}")
                 log_tensor_stats(image, "VAE decoded image")
                 image = (image / 2 + 0.5).clamp(0, 1)
                 log_tensor_stats(image, "Normalized image")
+                image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
+                logger.debug(f"Image numpy shape: {image.shape}, dtype: {image.dtype}")
+                image = [Image.fromarray((img * 255).astype(np.uint8)) for img in image][0]  # Get first image
+                logger.debug(f"Converted to PIL image for refiner: size={image.size}, mode={image.mode}")
 
-                # Convert to tensor for refiner, ensuring FP16 and GPU
-                image_tensor = torch.from_numpy(np.array(image)).permute(2, 0, 1).unsqueeze(0).to(device, dtype=dtype)
-                logger.debug(f"Image tensor for refiner: shape={image_tensor.shape}, dtype={image_tensor.dtype}, device={image_tensor.device}")
-                log_tensor_stats(image_tensor, "Image tensor for refiner")
-
-                # Call refiner pipeline with tensor input
+                # Call refiner pipeline with PIL image
                 with torch.no_grad():
                     refiner_output = refiner(
                         prompt=prompt,
-                        image=image_tensor,
+                        image=image,
                         num_inference_steps=num_refiner_steps,
                         denoising_start=1.0 - denoising_end,
                         guidance_scale=guidance_scale,
@@ -645,14 +680,15 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
                 latents = latents.unsqueeze(0)
             logger.debug(f"Latents before VAE decode shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
             log_tensor_stats(latents, "Latents before VAE decode")
-            latents = (1 / self.vae.config.scaling_factor * latents).to(device, dtype=dtype)
+            #latents = (1 / self.vae.config.scaling_factor * latents).to(device, dtype=dtype)
+            latents = (1 / refiner.vae.config.scaling_factor * latents).to(device, dtype=dtype)
             with torch.no_grad():
                 image = self.vae.decode(latents).sample
             logger.debug(f"VAE output image shape: {image.shape}, dtype: {image.dtype}, device: {image.device}")
             log_tensor_stats(image, "VAE output image")
             image = (image / 2 + 0.5).clamp(0, 1)
             log_tensor_stats(image, "Normalized image")
-            image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+            image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
             log_tensor_stats(torch.from_numpy(image), "Image before conversion to PIL")
 
             # Convert to PIL images
@@ -759,11 +795,11 @@ def generate_images_for_csv_rows(
     """Generate abstract images for CSV rows with matching IDs using theory prompts with refiner."""
     accelerator = Accelerator(
         cpu=False,
-        mixed_precision="fp16" if torch.cuda.is_available() else "no",  # Use FP16 on GPU
+        mixed_precision="no",  # Disable mixed precision, use FP32
         device_placement=True,  # Ensure device placement on GPU
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    dtype = torch.float32  # Use FP32 exclusively
 
     logger.info("Loading SDXL base pipeline with Accelerator...")
     base_pipeline = StableDiffusionXLPipeline.from_pretrained(
@@ -788,7 +824,7 @@ def generate_images_for_csv_rows(
     custom_pipeline = accelerator.prepare(custom_pipeline)
 
     logger.info("Loading SDXL refiner pipeline...")
-    refiner_pipeline = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+    refiner_pipeline = DebugStableDiffusionXLImg2ImgPipeline.from_pretrained(
         "stabilityai/stable-diffusion-xl-refiner-1.0",
         torch_dtype=dtype,
         use_safetensors=True,
@@ -798,7 +834,6 @@ def generate_images_for_csv_rows(
         subfolder="scheduler",
         use_safetensors=True,
     )
-    # Prepare refiner with accelerator to ensure FP16 and device consistency
     refiner_pipeline = accelerator.prepare(refiner_pipeline)
 
     # Move base pipeline components to GPU
@@ -866,10 +901,10 @@ def generate_images_for_csv_rows(
                         height=1024,
                         width=1024,
                         num_inference_steps=50,
-                        guidance_scale=10.0,
+                        guidance_scale=8.0,
                         negative_prompt=negative_prompt,
                         num_images_per_prompt=1,
-                        denoising_end=0.8,
+                        denoising_end=0.95,
                         refiner=refiner_pipeline,
                     )
                     safe_id = str(row_id).replace("/", "_").replace("\\", "_")
