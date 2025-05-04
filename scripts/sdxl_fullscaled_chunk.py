@@ -18,7 +18,7 @@ from collections import OrderedDict  # For LRU cache implementation
 
 # Configure logging
 log_dir = "/home/iris/Documents/deep_learning/src/logs"
-log_file = os.path.join(log_dir, "sdxl_chunks_noRefiner.log")
+log_file = os.path.join(log_dir, "sdxl_chunks_fullscaled_noRefiner.log")
 
 # Ensure the log directory exists
 os.makedirs(log_dir, exist_ok=True)
@@ -355,20 +355,20 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
     ):
         """Override to ensure valid time IDs."""
         logger.debug(f"_get_add_time_ids inputs: original_size={original_size}, crops_coords_top_left={crops_coords_top_left}, target_size={target_size}")
-        original_size = original_size or (128, 128)  # Further reduced resolution
+        original_size = original_size or (1024, 1024)
         crops_coords_top_left = crops_coords_top_left or (0, 0)
-        target_size = target_size or (128, 128)
+        target_size = target_size or (1024, 1024)
 
         original_height, original_width = original_size
         crop_top, crop_left = crops_coords_top_left
         target_height, target_width = target_size
 
-        original_height = original_height or 128
-        original_width = original_width or 128
+        original_height = original_height or 1024
+        original_width = original_width or 1024
         crop_top = crop_top or 0
         crop_left = crop_left or 0
-        target_height = target_height or 128
-        target_width = target_width or 128
+        target_height = target_height or 1024
+        target_width = target_width or 1024
 
         logger.debug(f"Validated inputs: original_size=({original_height}, {original_width}), crops_coords_top_left=({crop_top}, {crop_left}), target_size=({target_height}, {target_width})")
 
@@ -381,10 +381,10 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
     def __call__(
         self,
         prompt,
-        height=512,  # Further reduced resolution
-        width=512,
-        num_inference_steps=20,  # Further reduced steps
-        guidance_scale=9.0,
+        height=1024,
+        width=1024,
+        num_inference_steps=50,
+        guidance_scale=10.0,
         negative_prompt=None,
         num_images_per_prompt=1,
         **kwargs,
@@ -503,7 +503,7 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
         log_tensor_stats(torch.from_numpy(image), "Image before conversion to PIL")
 
-        # Convert to PIL images (at 128x128 resolution)
+        # Convert to PIL images
         images = [Image.fromarray((img * 255).astype(np.uint8)) for img in image]
         log_memory_usage()
         del latents, image
@@ -557,19 +557,6 @@ def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
         raise ValueError(f"No rows found in CSV with IDs: {id_list}")
     return prompts
 
-def upscale_image(image_path, output_path, target_size=(1024, 1024)):
-    """Upscale a single image to the target size and save it to the output path."""
-    try:
-        img = Image.open(image_path)
-        img_resized = img.resize(target_size, Image.Resampling.LANCZOS)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        img_resized.save(output_path)
-        logger.info(f"Upscaled and saved image to {output_path}")
-        del img, img_resized
-        cleanup_memory()
-    except Exception as e:
-        logger.error(f"Failed to upscale image {image_path}: {e}")
-
 def refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=300):
     """Refine the prompt using OpenAI API to add visual cues while keeping token count within limit."""
     system_prompt = (
@@ -611,15 +598,15 @@ def generate_images_for_csv_rows(
     csv_path,
     yaml_path,
     id_list_path,
-    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner",
-    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner_temp",
+    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_fullscaled_noRefiner",
+    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_fullscaled_noRefiner_temp",
     chunk_size=1,
 ):
     """Generate abstract images for CSV rows with matching IDs using theory prompts."""
     accelerator = Accelerator(
         cpu=False,
         mixed_precision="no",  # Disable mixed precision to use float32
-        device_placement=True,  # Ensureantan device placement on GPU
+        device_placement=True,  # Ensure device placement on GPU
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Loading SDXL pipeline with Accelerator...")
@@ -664,7 +651,7 @@ def generate_images_for_csv_rows(
     id_list = load_id_list(id_list_path)
 
     row_prompts = load_csv_rows_by_ids(csv_path, id_list, chunk_size=50)
-    os.makedirs(temp_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     negative_prompt = (
         "text, words, letters, abstract, low quality, blurry, distorted"
@@ -696,26 +683,18 @@ def generate_images_for_csv_rows(
                 try:
                     images = custom_pipeline(
                         prompt=refined_prompt,
-                        height=512,  # Further reduced resolution
-                        width=512,
-                        num_inference_steps=50,  # Further reduced steps
+                        height=1024,
+                        width=1024,
+                        num_inference_steps=50,
                         guidance_scale=10.0,
                         negative_prompt=negative_prompt,
                         num_images_per_prompt=1,
                     )
                     safe_id = str(row_id).replace("/", "_").replace("\\", "_")
-                    temp_id_path = os.path.join(temp_dir, safe_id)
-                    temp_image_path = os.path.join(temp_id_path, f"{safe_id}_{theory}.png")
                     output_path = os.path.join(output_dir, safe_id, f"{safe_id}_{theory}.png")
-                    os.makedirs(temp_id_path, exist_ok=True)
-                    images[0].save(temp_image_path)
-                    logger.info(f"Saved temporary image (128x128) to {temp_image_path}")
-                    upscale_image(temp_image_path, output_path, target_size=(1024, 1024))
-                    try:
-                        os.remove(temp_image_path)
-                        os.rmdir(temp_id_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to clean up {temp_image_path}: {e}")
+                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                    images[0].save(output_path)
+                    logger.info(f"Saved image to {output_path}")
                     del images
                     cleanup_memory()
                 except Exception as e:
@@ -731,17 +710,6 @@ def generate_images_for_csv_rows(
         cleanup_memory()
         del chunk
         cleanup_memory()
-
-    logger.info(f"Cleaning up temporary directory: {temp_dir}")
-    try:
-        for root, dirs, files in os.walk(temp_dir, topdown=False):
-            for file in files:
-                os.remove(os.path.join(root, file))
-            for dir in dirs:
-                os.rmdir(os.path.join(root, dir))
-        os.rmdir(temp_dir)
-    except Exception as e:
-        logger.warning(f"Failed to remove temporary directory {temp_dir}: {e}")
 
     logger.info("Image generation complete.")
 
