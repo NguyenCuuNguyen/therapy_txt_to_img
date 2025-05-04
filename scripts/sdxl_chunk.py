@@ -691,14 +691,14 @@ def generate_images_for_csv_rows(
                     logger.debug(f"Using cached refined prompt for: {prompt[:100]}...")
                 logger.info(f"Generating image for theory: {theory}")
                 if i == 0:
-                    logger.info(f"Refined prompt: {refined_prompt[:100]}...")
+                    logger.info(f"Refined prompt: {refined_prompt}...")
                 i += 1
                 try:
                     images = custom_pipeline(
                         prompt=refined_prompt,
-                        height=64,  # Further reduced resolution
-                        width=64,
-                        num_inference_steps=25,  # Further reduced steps
+                        height=512,  # Further reduced resolution
+                        width=512,
+                        num_inference_steps=50,  # Further reduced steps
                         guidance_scale=9.0,
                         negative_prompt=negative_prompt,
                         num_images_per_prompt=1,
