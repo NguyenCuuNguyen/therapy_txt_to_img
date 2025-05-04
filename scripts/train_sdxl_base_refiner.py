@@ -167,7 +167,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             "t5_hidden_size": 768,
             "unet_cross_attn_dim": 2048,
             "base_pooled_embed_dim": 1280,
-            "refiner_pooled_embed_dim": 2560
+            "refiner_pooled_embed_dim": 4096 #Correct dimension for refiner UNet
         }
 
         self.register_modules(
@@ -210,10 +210,18 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
             if refiner_pool_projection_layer is None:
                 self.logger.info(f"Initializing Refiner Pool Projection Layer T5({t5_hidden_size}) -> SDXL Refiner AddEmbs({refiner_pooled_embed_dim})")
                 self.refiner_pool_projection_layer = torch.nn.Linear(t5_hidden_size, refiner_pooled_embed_dim)
-                torch.nn.init.normal_(self.pool_projection_layer.weight, mean=0.0, std=0.02)
-                torch.nn.init.zeros_(self.pool_projection_layer.bias)
+                torch.nn.init.normal_(self.refiner_pool_projection_layer.weight, mean=0.0, std=0.02)  # Fix: Initialize refiner_pool_projection_layer
+                torch.nn.init.zeros_(self.refiner_pool_projection_layer.bias)  # Fix: Initialize refiner_pool_projection_layer
             else:
                 self.refiner_pool_projection_layer = refiner_pool_projection_layer
+
+            # Add a check to ensure correct output dimension
+            if self.refiner_pool_projection_layer.out_features != refiner_pooled_embed_dim:
+                self.logger.warning(f"Refiner pool projection layer output dimension {self.refiner_pool_projection_layer.out_features} does not match expected {refiner_pooled_embed_dim}. Reinitializing...")
+                self.refiner_pool_projection_layer = torch.nn.Linear(t5_hidden_size, refiner_pooled_embed_dim)
+                torch.nn.init.normal_(self.refiner_pool_projection_layer.weight, mean=0.0, std=0.02)
+                torch.nn.init.zeros_(self.refiner_pool_projection_layer.bias)
+
             if self.refiner_pool_projection_layer.out_features != refiner_pooled_embed_dim:
                 raise ValueError(f"refiner_pool_projection_layer output dimension {self.refiner_pool_projection_layer.out_features} does not match expected {refiner_pooled_embed_dim}")
         else:
@@ -281,29 +289,32 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
 
 
         pooled_output_t5 = encoder_hidden_states_t5.mean(dim=1)
+        self.logger.info(f"Pooled T5 output shape: {pooled_output_t5.shape}")
         if not hasattr(self, 'pool_projection_layer') or self.pool_projection_layer is None:
             raise AttributeError("pool_projection_layer is required.")
         base_text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
         # base_text_embeds = torch.nan_to_num(base_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
-        self.logger.debug(f"Base text_embeds shape: {base_text_embeds.shape}, mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}")
+        self.logger.info(f"Base text_embeds shape: {base_text_embeds.shape}, mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}")
                 
         if torch.isnan(prompt_embeds).any() or torch.isinf(prompt_embeds).any():
             self.logger.warning("NaN/Inf in prompt_embeds after projection.")
         base_text_embeds = self.pool_projection_layer(pooled_output_t5.to(dtype=self.pool_projection_layer.weight.dtype))
-        self.logger.debug(f"Base text_embeds - mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}, min: {base_text_embeds.min().item():.4f}, max: {base_text_embeds.max().item():.4f}")
+        self.logger.info(f"Base text_embeds - mean: {base_text_embeds.mean().item():.4f}, std: {base_text_embeds.std().item():.4f}, min: {base_text_embeds.min().item():.4f}, max: {base_text_embeds.max().item():.4f}")
         if torch.isnan(base_text_embeds).any() or torch.isinf(base_text_embeds).any():
             self.logger.warning("NaN/Inf in base_text_embeds after projection.")
 
         refiner_text_embeds = None
         if self.refiner_unet is not None and self.refiner_pool_projection_layer is not None:
+            self.logger.info(f"Before refiner projection - Pooled T5 output shape: {pooled_output_t5.shape}")
             refiner_text_embeds = self.refiner_pool_projection_layer(pooled_output_t5.to(dtype=self.refiner_pool_projection_layer.weight.dtype))
+            self.logger.info(f"After refiner projection - Refiner text_embeds shape: {refiner_text_embeds.shape}")
             # refiner_text_embeds = torch.nan_to_num(refiner_text_embeds, nan=0.0, posinf=1.0, neginf=-1.0)
             expected_refiner_dim = self.pipeline_config["refiner_pooled_embed_dim"]
             if refiner_text_embeds.shape[-1] != expected_refiner_dim:
                 raise ValueError(f"refiner_text_embeds dimension {refiner_text_embeds.shape[-1]} does not match expected {expected_refiner_dim}")
-            self.logger.debug(f"Refiner text_embeds shape: {refiner_text_embeds.shape}, mean: {refiner_text_embeds.mean().item():.4f}, std: {refiner_text_embeds.std().item():.4f}")
+            self.logger.info(f"Refiner text_embeds shape: {refiner_text_embeds.shape}, mean: {refiner_text_embeds.mean().item():.4f}, std: {refiner_text_embeds.std().item():.4f}")
         else:
-            self.logger.debug("No refiner UNet or refiner_pool_projection_layer; using base text_embeds only.")
+            self.logger.info("No refiner UNet or refiner_pool_projection_layer; using base text_embeds only.")
 
         image_size = self.pipeline_config.get("image_size", 512)
         original_size = (image_size, image_size)
@@ -454,6 +465,7 @@ class StableDiffusionXLPipelineWithT5(DiffusionPipeline, ConfigMixin):
                 for i, t in enumerate(refiner_timesteps):
                     latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                    self.logger.info(f"Refiner UNet input - refiner_text_embeds shape: {added_cond_kwargs['refiner_text_embeds'].shape}")
 
                     noise_pred = self.refiner_unet(
                         sample=latent_model_input,
@@ -1305,9 +1317,10 @@ class FinetuneModel:
                 val_loss = self.validate(val_dataloader, image_folder, perceptual_loss_weight)
 
                 if self.current_epoch % generation_frequency == 0:
-                    val_image_dir = os.path.join(self.output_dir, f"val_images_epoch_{self.current_epoch}")
-                    self.generate_validation_images(validation_prompts, val_image_dir, self.current_epoch, use_pretrained=False)
-                    self.generate_validation_images(validation_prompts, val_image_dir, self.current_epoch, use_pretrained=True)
+                    val_image_dir_ft = os.path.join(self.output_dir, f"val__finetune_images_epoch_{self.current_epoch}")
+                    val_image_dir_pt = os.path.join(self.output_dir, f"val__pretrained_images_epoch_{self.current_epoch}")
+                    self.generate_validation_images(validation_prompts, val_image_dir_ft, self.current_epoch, use_pretrained=False)
+                    self.generate_validation_images(validation_prompts, val_image_dir_pt, self.current_epoch, use_pretrained=True)
 
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
@@ -1406,7 +1419,7 @@ def run_finetune(config_path, hyperparam_config_path):
             "/home/iris/Documents/deep_learning/experiments/trained_sdxl_t5_refiner", "logs"
         )
     )
-    logger = get_logger(__name__, log_level="INFO")
+    logger = get_logger(__name__, log_level="DEBUG")
     print(f"Logging to {LOG_FILE}")
 
     config = load_config(config_path)
