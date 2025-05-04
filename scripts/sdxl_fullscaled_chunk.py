@@ -561,8 +561,8 @@ def refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=
     """Refine the prompt using OpenAI API to add visual cues while keeping token count within limit."""
     system_prompt = (
         "You are an expert prompt engineer for image generation from psychotherapy theory perspective. Given a psychotherapy theory and relevant information about a person, Your task is to refine the provided prompt by adding "
-        "photorealistic descriptive visual cues (e.g., 'a woman sitting and thinking deeply about family, with images of school, children, and old parents in the background. In front of her are opened notebooks with F grades.') "
-        "to make the image more illustrative of the person's life, meaningful and visually coherent, while preserving the core themes and instructions. "
+        "photorealistic descriptive visual cues (e.g., 'a woman sitting and thinking deeply about family, with images of school, children, and old parents in the background. In front of her are opened notebooks with F grades. Add a volcano in the background for anger.') "
+        "to make the image more illustrative of the person's life, events, emotions, meaningful and visually coherent, while preserving the core themes and instructions. "
         "Output only the refined prompt, with no additional explanations or formatting."
     )
     user_prompt = (
