@@ -75,6 +75,10 @@ iter 1:
 iter 2: 
     bigger_kadinsky
 
+iter 3:
+    
+
+
 
 ## Iteration 0: New finetune model focuses more on Karlo and DeepFloydIF
 Clear hugging face cache: rm -rf ~/.cache/huggingface/hub/models--*

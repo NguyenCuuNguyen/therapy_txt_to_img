@@ -7,6 +7,7 @@ import yaml
 from PIL import Image
 import numpy as np
 import gc
+import re
 import psutil
 import torchvision
 import transformers
@@ -557,18 +558,57 @@ def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
         raise ValueError(f"No rows found in CSV with IDs: {id_list}")
     return prompts
 
+#added this to test another set of prompts
+def extract_theory_essence(prompt):
+    """Extract the theory-specific essence from a prompt."""
+    # Extract the sentence after '{txt_prompt}.' and before 'Do not include'
+    match = re.search(r'\{txt_prompt\}\.\s*(.*?)\s*Do not include', prompt)
+    if match:
+        return match.group(1)
+    return ""
+
+def load_id_list(id_list_path):
+    """Load list of IDs from a text file."""
+    try:
+        with open(id_list_path, "r") as f:
+            id_list = [line.strip() for line in f if line.strip()]
+        return id_list
+    except Exception as e:
+        logger.error(f"Failed to load ID list from {id_list_path}: {e}")
+        raise
+
+
 def refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=300):
     """Refine the prompt using OpenAI API to add visual cues while keeping token count within limit."""
+    # system_prompt = (
+    #     "You are an expert prompt engineer for image generation from psychotherapy theory perspective. Given a psychotherapy theory and relevant information about a person, Your task is to refine the provided prompt by adding "
+    #     "photorealistic descriptive visual cues (e.g., 'a woman sitting and thinking deeply about family, with images of school, children, and old parents in the background. In front of her are opened notebooks with F grades. Add a volcano in the background for anger.') "
+    #     "to make the image more illustrative of the person's life, events, emotions, meaningful and visually coherent, while preserving the core themes and instructions. "
+    #     "Output only the refined prompt, with no additional explanations or formatting."
+    # )
+    # user_prompt = (
+    #     f"Refine the following prompt by adding photorealistic visual cues (e.g., a man feeding his dog with 2 children playing in the background) to enhance its visual coherence for image generation, "
+    #     f"while keeping the core themes and instructions intact. Target around {target_max_tokens} tokens. "
+    #     f"Prompt:\n\n\"{prompt}\""
+    # )
     system_prompt = (
-        "You are an expert prompt engineer for image generation from psychotherapy theory perspective. Given a psychotherapy theory and relevant information about a person, Your task is to refine the provided prompt by adding "
-        "photorealistic descriptive visual cues (e.g., 'a woman sitting and thinking deeply about family, with images of school, children, and old parents in the background. In front of her are opened notebooks with F grades. Add a volcano in the background for anger.') "
-        "to make the image more illustrative of the person's life, events, emotions, meaningful and visually coherent, while preserving the core themes and instructions. "
-        "Output only the refined prompt, with no additional explanations or formatting."
+        """
+            You are an expert prompt engineer specializing in visual storytelling grounded in psychotherapy theory. Given a theoretical orientation (e.g., CBT, psychodynamic, narrative) and a dictionary summary of session topics, your task is to generate a visually rich and symbolically expressive prompt that illustrates the client’s emotional landscape, inner conflicts, and life themes as discussed in the session.
+
+            Incorporate vivid, photorealistic imagery and metaphoric cues that reflect the core principles of the theory (e.g., in CBT, show the interplay of thoughts, emotions, and behaviors; in psychodynamic, reveal influences of past relationships on present experience; in narrative, convey the unfolding story of the person’s identity).
+            The output must be:
+            – Visually coherent and evocative
+            – Free from text or literal depictions of therapy sessions/settings
+            – Aligned with the emotional tone of the session topics
+
+            Output only the refined image prompt with no explanation or formatting.
+
+        """
     )
     user_prompt = (
-        f"Refine the following prompt by adding photorealistic visual cues (e.g., a man feeding his dog with 2 children playing in the background) to enhance its visual coherence for image generation, "
-        f"while keeping the core themes and instructions intact. Target around {target_max_tokens} tokens. "
-        f"Prompt:\n\n\"{prompt}\""
+        f"Given the following psychotherapy theory and session topics, write a vivid and symbolic description suitable for image generation. The image should represent the client’s inner experience, personal struggles, and emotional world, using metaphor and rich visual language that aligns with the therapeutic orientation; "
+        f"while keeping the core themes and instructions intact. Avoids describing literal therapy settings, and excludes text."
+        f"Target around {target_max_tokens} tokens. Prompt:\n\n\"{prompt}\""
     )
 
     messages = [
@@ -648,6 +688,9 @@ def generate_images_for_csv_rows(
     tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
 
     theory_prompts = load_theory_prompts(yaml_path)
+    # Extract essence for each theory
+    theory_essences = {theory: extract_theory_essence(prompt) for theory, prompt in theory_prompts.items()}
+
     id_list = load_id_list(id_list_path)
 
     row_prompts = load_csv_rows_by_ids(csv_path, id_list, chunk_size=50)
@@ -667,19 +710,20 @@ def generate_images_for_csv_rows(
             logger.info(f"Processing row with ID: {row_id}")
             for theory, prompt_template in theory_prompts.items():
                 base_prompt = prompt_template.format(txt_prompt=txt_prompt)
-                prompt = f"An illustration representing {theory} themes in this person's life: {base_prompt}, with vibrant colors and expressive patterns"
+                # Summarize transcript using the theory's essence
+                theory_essence = theory_essences[theory]
+                prompt = f"Summarize the following dictionary of topics in a therapy session from a {theory_essence} psychotherapy perspective. Include photorealistic, imagery-rich cues for abstract image generation. Avoid literal therapy settings or text."
+                # prompt = f"An illustration representing {theory} themes in this person's life: {base_prompt}, with vibrant colors and expressive patterns"
                 refined_prompt = prompt_cache.get(prompt)
                 if refined_prompt is None:
-                    logger.debug(f"Base prompt before refinement: {prompt[:100]}...")
+                    logger.debug(f"Base prompt before refinement: {prompt}...")
                     refined_prompt = refine_prompt_with_openai(openai_util, prompt, tokenizer, target_max_tokens=300)
                     prompt_cache.put(prompt, refined_prompt)
                     cleanup_memory()
                 else:
-                    logger.debug(f"Using cached refined prompt for: {prompt[:100]}...")
+                    logger.debug(f"Using cached refined prompt for: {prompt}...")
                 logger.info(f"Generating image for theory: {theory}")
-                if i == 0:
-                    logger.info(f"Refined prompt: {refined_prompt}...")
-                i += 1
+                logger.info(f"Refined prompt: {refined_prompt}...")
                 try:
                     images = custom_pipeline(
                         prompt=refined_prompt,
