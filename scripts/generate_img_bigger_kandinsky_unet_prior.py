@@ -119,7 +119,7 @@ def load_pipeline_with_lora(model_name, base_model_ids, lora_checkpoint_dir, dev
         logger.info(f"Loaded T5-base text encoder on {device} with dtype {t5_dtype}")
 
         # Load text encoder LoRA weights
-        text_encoder_lora_path = os.path.join(lora_checkpoint_dir, "best_text_encoder_lora")
+        text_encoder_lora_path = os.path.join(lora_checkpoint_dir, "best_unet_lora")
         if not os.path.exists(text_encoder_lora_path):
             raise FileNotFoundError(f"Text encoder LoRA weights not found at {text_encoder_lora_path}")
         text_encoder = PeftModel.from_pretrained(text_encoder, text_encoder_lora_path, torch_dtype=t5_dtype).to(device)
@@ -336,7 +336,7 @@ def main():
     sample_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
     prompt_variations_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
     generation_output_base = "/home/iris/Documents/deep_learning/generated_images/iter2"
-    lora_checkpoint_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky_unet_prior"
+    lora_checkpoint_dir = "/home/iris/Documents/deep_learning/experiments/bigger_kandinsky/best_t5_kandinsky_unet_prior/config_0_loss_0.1713"
 
     config = load_config(config_path)
     if config is None:

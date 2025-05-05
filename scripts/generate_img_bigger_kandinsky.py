@@ -59,6 +59,7 @@ class KandinskyV22PriorPipelineWithT5(KandinskyV22PriorPipeline):
         if projection_layer is None:
             raise ValueError("Projection layer is required for T5 encoder.")
         self.register_modules(vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, prior=prior, scheduler=scheduler)
+        
         self.logger.info("Initialized KandinskyV22PriorPipelineWithT5 with projection layer.")
 
     @classmethod
