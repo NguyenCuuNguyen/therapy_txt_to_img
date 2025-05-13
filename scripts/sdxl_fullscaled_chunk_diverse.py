@@ -793,7 +793,7 @@ def generate_images_for_csv_rows(
                         prompt=refined_prompt,
                         height=1024,
                         width=1024,
-                        num_inference_steps=100,  # Increased for detail
+                        num_inference_steps=150,  # Increased for detail
                         guidance_scale=12.0,  # Adjusted for sharper adherence to prompt
                         negative_prompt=negative_prompt,
                         num_images_per_prompt=1,
