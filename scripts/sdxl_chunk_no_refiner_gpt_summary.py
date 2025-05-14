@@ -659,8 +659,8 @@ def generate_images_for_transcripts(
     transcript_dir,
     yaml_path,
     id_list_path,
-    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner_gpt",
-    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl_chunks_noRefiner_gpt_temp",
+    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl/chunks_noRefiner_gpt",
+    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl/chunks_noRefiner_gpt_temp",
     chunk_size=1,
 ):
     """Generate abstract images for transcripts with matching IDs using theory prompts."""

@@ -1,6 +1,15 @@
-diffusers==0.21.0 transformers==4.31.0 accelerate==0.21.0 safetensors==0.3.1 sentencepiece==0.1.99 torch==2.0.1 xformers==0.0.20 pandas==2.0.3 numpy==1.24.3 pyyaml==6.0.1
-openai
+torch==2.1.1+cu121
+torchvision==0.16.0+cu121
+diffusers==0.29.2
+transformers==4.41.0
+xformers==0.0.23
+pandas
+numpy
+pillow
+psutil
+pyyaml
+peft
 accelerate
-sentencepiece
-xformers
-hf_xet
+pycocotools
+bitsandbytes
+openai

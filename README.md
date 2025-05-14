@@ -65,7 +65,7 @@ SDXL:
 #how to run:
 cd generated_images
 mkdir -p /home/iris/Documents/deep_learning/experiments/{new_finetune}/{sdxl,kandinsky,karlo,deepfloyd_if}
-export PYTHONPATH="/path/to/your/project:$PYTHONPATH"
+export PYTHONPATH="/home/iris/Documents/deep_learning"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 iter 1:

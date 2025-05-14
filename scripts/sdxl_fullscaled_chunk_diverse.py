@@ -507,26 +507,25 @@ def extract_theory_essence(prompt):
         return match.group(1)
     return ""
 
-def generate_metaphors_with_openai(openai_util, key_themes, theory, guideline, tokenizer, max_tokens=200):
+def generate_metaphors_with_openai(openai_util, key_themes, theory, focus, tokenizer, max_tokens=200):
     system_prompt = (
-        f"You are an expert in visual storytelling for {theory} psychotherapy. Generate unique, photorealistic visual metaphors for the provided transcript details, ensuring each metaphor vividly reflects the specific content and emotional tone. "
-        f"Based on the transcript’s tone (e.g., chaotic, hopeful), decide whether the metaphors form a fragmented collage or a cohesive scene. "
-        f"Align metaphors with the {theory} perspective, using {guideline['metaphor_style']} and incorporating {', '.join(guideline['key_elements'])}. "
-        f"Output a list of metaphors, one for each priority detail, in the format: '[Detail]: [Metaphor description].' Avoid generic imagery (e.g., oceans, cliffs). Target ~{max_tokens} tokens."
+        f"You are an expert in visual storytelling for {theory} psychotherapy. Generate unique, photorealistic visual metaphors for the provided transcript details, ensuring each metaphor vividly reflects the specific content and emotional tone (e.g., chaotic, hopeful, somber). "
+        f"Based on the transcript’s tone and content, determine an appropriate visual style (e.g., vibrant, muted, abstract) and decide whether the metaphors form a fragmented collage or a cohesive scene. "
+        f"Align metaphors with the {theory} perspective, emphasizing {focus.lower()}. "
+        f"Output a list of metaphors, one for each priority detail, in the format: '[Detail]: [Metaphor description].' Avoid generic imagery (e.g., oceans, cliffs, forests). Target ~{max_tokens} tokens."
     )
     user_prompt = (
-        f"Generate visual metaphors for these transcript details in a {theory} perspective:\n"
+        f"Generate visual metaphors for these transcript details in a {theory} perspective, emphasizing {focus.lower()}:\n"
         f"Priority Details: {', '.join(key_themes['priority_details']) if key_themes['priority_details'] else 'not specified'}.\n"
         f"Emotions: {', '.join(key_themes['emotions']) if key_themes['emotions'] else 'not specified'}.\n"
         f"Events: {', '.join(key_themes['events']) if key_themes['events'] else 'not specified'}.\n"
         f"Relationships: {', '.join(key_themes['relationships']) if key_themes['relationships'] else 'not specified'}.\n"
         f"Themes: {', '.join(key_themes['themes']) if key_themes['themes'] else 'not specified'}.\n"
-        f"Guidelines:\n"
-        f"- Focus: {guideline['focus']}.\n"
-        f"- Tone: {guideline['tone']}.\n"
-        f"- Metaphor Style: {guideline['metaphor_style']}.\n"
-        f"- Key Elements: {', '.join(guideline['key_elements'])}.\n"
-        f"Output metaphors as a list, ensuring uniqueness and specificity. Target ~{max_tokens} tokens."
+        f"Requirements:\n"
+        f"- Infer visual style from the transcript’s tone and content.\n"
+        f"- Choose a collage for complex/chaotic tones or a cohesive scene for unified/hopeful tones.\n"
+        f"- Ensure metaphors are unique, specific, and tied to the transcript’s content.\n"
+        f"Output metaphors as a list. Target ~{max_tokens} tokens."
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -550,54 +549,30 @@ def generate_metaphors_with_openai(openai_util, key_themes, theory, guideline, t
 
 def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, theory, target_max_tokens=500):
     theory_guidelines = {
-        "cbt": {
-            "focus": "interplay of thoughts, emotions, behaviors",
-            "tone": "dynamic, structured, high-contrast",
-            "metaphor_style": "technological, urban, or mechanical elements to represent cognitive processes",
-            "key_elements": ["balance (e.g., scales, bridges)", "distortion (e.g., mirrors, warped surfaces)", "clarity (e.g., light, lenses)"]
-        },
-        "psychodynamic": {
-            "focus": "past relationships influencing present",
-            "tone": "ethereal, layered, introspective",
-            "metaphor_style": "historical, organic, or dreamlike elements to evoke memory and emotion",
-            "key_elements": ["repressed elements (e.g., locked objects, hidden paths)", "connections (e.g., roots, threads)", "reflections (e.g., pools, mirrors)"]
-        },
-        "narrative": {
-            "focus": "unfolding story of identity and transformation",
-            "tone": "vibrant, flowing, narrative-driven",
-            "metaphor_style": "journey-based, artistic, or storytelling elements to represent life arcs",
-            "key_elements": ["paths (e.g., roads, rivers)", "stories (e.g., books, tapestries)", "guidance (e.g., lights, stars)"]
-        }
+        "cbt": {"focus": "interplay of thoughts, emotions, behaviors"},
+        "psychodynamic": {"focus": "past relationships influencing present"},
+        "narrative": {"focus": "unfolding story of identity and transformation"}
     }
-    guideline = theory_guidelines.get(theory, {
-        "focus": "general emotional landscape",
-        "tone": "neutral",
-        "metaphor_style": "abstract",
-        "key_elements": ["generic emotional symbols"]
-    })
-    metaphor_mappings = generate_metaphors_with_openai(openai_util, key_themes, theory, guideline, tokenizer, max_tokens=200)
+    guideline = theory_guidelines.get(theory, {"focus": "general emotional landscape"})
+    metaphor_mappings = generate_metaphors_with_openai(openai_util, key_themes, theory, guideline['focus'], tokenizer, max_tokens=200)
     system_prompt = (
         f"You are an expert prompt engineer specializing in visual storytelling for {theory} psychotherapy. Craft a symbolic, photorealistic image prompt that vividly captures the client’s unique emotional landscape, inner conflicts, relationships, and life themes, prioritizing the specific details from 'Priority Details,' 'Emotions,' 'Events,' and 'Relationships.' "
-        f"Use the provided transcript-specific metaphors and guidelines to create a highly detailed, evocative scene or collage, reflecting the transcript’s emotional tone. Each visual element must directly reflect the transcript’s unique content, weaving in short, impactful phrases from the details to inspire vivid imagery. "
-        f"Apply the theory guidelines as a stylization layer, ensuring the output is coherent, fits a 1024x1024 image without cropping, and excludes text, therapy settings, or generic imagery (e.g., oceans, cliffs, forests)."
+        f"Use the provided transcript-specific metaphors to create a highly detailed, evocative scene or collage, reflecting the transcript’s emotional tone (e.g., chaotic, hopeful). Each visual element must directly reflect the transcript’s unique content, weaving in short, impactful phrases from the details to inspire vivid imagery. "
+        f"Determine the visual style (e.g., vibrant, muted, abstract) based on the transcript’s tone and content, ensuring alignment with the {theory} perspective’s focus on {guideline['focus'].lower()}. "
+        f"The output must be coherent, fit a 1024x1024 image without cropping, and exclude text, therapy settings, or generic imagery (e.g., oceans, cliffs, forests)."
     )
     user_prompt = (
-        f"Enhance the following base prompt for a {theory} perspective, ensuring it {guideline['focus'].lower()}. "
-        f"Prioritize these transcript details:\n"
+        f"Enhance the following base prompt for a {theory} perspective, emphasizing {guideline['focus'].lower()}:\n"
         f"Priority Details: {', '.join(key_themes['priority_details']) if key_themes['priority_details'] else 'not specified'}.\n"
         f"Emotions: {', '.join(key_themes['emotions']) if key_themes['emotions'] else 'not specified'}.\n"
         f"Events: {', '.join(key_themes['events']) if key_themes['events'] else 'not specified'}.\n"
         f"Relationships: {', '.join(key_themes['relationships']) if key_themes['relationships'] else 'not specified'}.\n"
         f"Themes: {', '.join(key_themes['themes']) if key_themes['themes'] else 'not specified'}.\n"
-        f"Guidelines:\n"
-        f"- Focus: {guideline['focus']}.\n"
-        f"- Tone: {guideline['tone']}.\n"
-        f"- Metaphor Style: {guideline['metaphor_style']}.\n"
-        f"- Key Elements: Include {', '.join(guideline['key_elements'])}.\n"
-        f"- Specific Metaphors: {', '.join(metaphor_mappings) if metaphor_mappings else 'generate unique metaphors based on the details, weaving in phrases from Priority Details'}.\n"
         f"Requirements:\n"
+        f"- Infer visual style from the transcript’s tone and content.\n"
+        f"- Choose a collage for complex/chaotic tones or a cohesive scene for unified/hopeful tones.\n"
+        f"- Use these metaphors: {', '.join(metaphor_mappings) if metaphor_mappings else 'generate unique metaphors based on the details, weaving in phrases from Priority Details'}.\n"
         f"- Craft a unique scene or collage that vividly reflects the transcript’s content, integrating short phrases from Priority Details into the narrative flow.\n"
-        f"- Decide whether a collage or cohesive scene based on the transcript’s emotional tone (e.g., collage for chaos, scene for hope).\n"
         f"- Avoid therapy settings, text, or generic scenes.\n"
         f"- Ensure each visual element ties directly to the transcript for maximum specificity.\n"
         f"Target ~{target_max_tokens} tokens.\n\nBase Prompt:\n{base_prompt}"
@@ -620,8 +595,8 @@ def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, t
             refined_prompt = summarize_prompt(refined_prompt, max_tokens=target_max_tokens)
         second_user_prompt = (
             f"Further refine the following prompt to make it even more specific to the transcript details, ensuring each visual element vividly reflects the unique 'Priority Details,' 'Emotions,' 'Events,' and 'Relationships.' "
-            f"Integrate short phrases from these details into a cohesive narrative or collage, maintaining the {theory} perspective and {guideline['tone']} tone. "
-            f"Avoid generic imagery and ensure the prompt fits a 1024x1024 image without cropping.\n\nPrompt:\n{refined_prompt}"
+            f"Integrate short phrases from these details into a cohesive narrative or collage, maintaining the {theory} perspective’s focus on {guideline['focus'].lower()}. "
+            f"Infer the visual style from the transcript’s tone and content. Avoid generic imagery and ensure the prompt fits a 1024x1024 image without cropping.\n\nPrompt:\n{refined_prompt}"
         )
         second_messages = [
             {"role": "system", "content": system_prompt},
@@ -647,8 +622,8 @@ def generate_images_for_csv_rows(
     csv_path,
     yaml_path,
     id_list_path,
-    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl/chunk_fullscaled_diverse_gpt_iter",
-    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl/chunk_fullscaled_diverse_gpt_iter_temp",
+    output_dir="/home/iris/Documents/deep_learning/generated_images/sdxl/chunk_fullscaled_diverse_freestyle",
+    temp_dir="/home/iris/Documents/deep_learning/generated_images/sdxl/chunk_fullscaled_diverse_freestyle_temp",
     chunk_size=1,
 ):
     accelerator = Accelerator(
