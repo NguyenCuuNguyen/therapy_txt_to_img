@@ -1,3 +1,5 @@
+```python /home/iris/Documents/deep_learning/scripts/sdxl_fullscaled_chunk_diverse.py```
+
 ## Fine-Tuning Process:
     SDXL and Kandinsky: Use Hugging Face’s diffusers library with DreamBooth or Low-Rank Adaptation (LoRA) to fine-tune on the therapy dataset. LoRA is preferred for lower memory usage on the RTX 4090.
     Karlo: Fine-tune the unCLIP model using a similar dataset, focusing on text-image alignment.
@@ -41,6 +43,7 @@ Use model offloading (enable_model_cpu_offload) for DeepFloyd IF to move unused 
 ```rm -rf ~/.cache/huggingface/hub/models--*```
 
 ```python scripts/run_finetune_multiple_epochs.py```
+
 
 ## Iteration 1: Generate images
 Run ```python scripts/generate_images_from_finetuned.py``` to
@@ -92,3 +95,7 @@ Setup to train originally with COCO: includes sdxl, kandinsky, karlo and deepflo
 
 
 New set up emphasized on karlo and deepfloyd but that does not really work because deepfloyd has OOM error and karlo also has error, could not train sucessfully
+
+
+## IMAGES
+sdxl fulscaled chunk diverse with 100 or 150 infernece step has rigid scaffolding of visual metaphors.

@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 import torch
 from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 import pandas as pd
@@ -16,8 +16,9 @@ from accelerate import Accelerator
 from transformers import T5Tokenizer
 from src.utils.openai_utils import OpenAIUtils
 from collections import OrderedDict
+import random
 
-# Configure logging
+# Configure logging (unchanged)
 log_dir = "/home/iris/Documents/deep_learning/src/logs"
 log_file = os.path.join(log_dir, "sdxl_chunks_fullscaled_noRefiner_diverse.log")
 os.makedirs(log_dir, exist_ok=True)
@@ -47,6 +48,7 @@ except ImportError:
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:32,garbage_collection_threshold:0.6"
 
+# Memory management functions (unchanged)
 def cleanup_memory():
     gc.collect()
     if torch.cuda.is_available():
@@ -69,6 +71,7 @@ def log_tensor_stats(tensor, name):
     if tensor is not None:
         logger.debug(f"{name} stats: shape={tensor.shape}, dtype={tensor.dtype}, min={tensor.min().item():.4f}, max={tensor.max().item():.4f}, mean={tensor.mean().item():.4f}, std={tensor.std().item():.4f}")
 
+# Summarize prompt (unchanged)
 def summarize_prompt(prompt, max_tokens=500):
     words = prompt.split()
     if len(words) <= max_tokens:
@@ -93,6 +96,7 @@ def summarize_prompt(prompt, max_tokens=500):
             break
     return ". ".join(summarized) + ("." if summarized else "")
 
+# LRUCache (unchanged)
 class LRUCache:
     def __init__(self, capacity=100):
         self.cache = OrderedDict()
@@ -111,6 +115,7 @@ class LRUCache:
         if len(self.cache) > self.capacity:
             self.cache.popitem(last=False)
 
+# SDXLChunkingPipeline (unchanged)
 class SDXLChunkingPipeline(StableDiffusionXLPipeline):
     def __init__(self, vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, unet, scheduler):
         super().__init__(
@@ -434,6 +439,7 @@ class SDXLChunkingPipeline(StableDiffusionXLPipeline):
         cleanup_memory()
         return images
 
+# Utility functions (unchanged)
 def load_theory_prompts(yaml_path):
     try:
         with open(yaml_path, "r") as f:
@@ -454,6 +460,7 @@ def load_id_list(id_list_path):
         logger.error(f"Failed to load ID list from {id_list_path}: {e}")
         raise
 
+# Modified load_csv_rows_by_ids to extract specific phrases
 def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
     id_list = [str(id_val) for id_val in id_list]
     prompts = []
@@ -470,7 +477,8 @@ def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
                 "events": [],
                 "relationships": [],
                 "themes": [],
-                "priority_details": []
+                "priority_details": [],
+                "specific_phrases": []  # New field for specific phrases
             }
             priority_fields = [
                 "family_relationships", "relationship_issues", "life_events", "personal_obstacles",
@@ -481,6 +489,13 @@ def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
             for key, value in row_dict.items():
                 if key not in ["file"] and pd.notnull(value):
                     value = value.strip()
+                    # Extract specific phrases (3–5 words) for metaphors
+                    words = value.split()
+                    if len(words) >= 3:
+                        phrases = [" ".join(words[i:i+5]) for i in range(0, len(words)-2) if len(words[i:i+5]) >= 3]
+                        key_themes["specific_phrases"].extend(phrases[:2])  # Limit to 2 phrases per field
+                    else:
+                        key_themes["specific_phrases"].append(value)
                     if len(value.split()) > 20:
                         value = " ".join(value.split()[:20]) + "..."
                     if key in ["anxiety", "emotional_health", "frustration", "inner_conflict", "fear"]:
@@ -493,7 +508,7 @@ def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
                         key_themes["themes"].append(f"{key}: {value}")
                     if key in priority_fields:
                         key_themes["priority_details"].append(f"{key}: {value}")
-            txt_prompt = "; ".join([f"{key}: {', '.join(values) if isinstance(values, list) else values}" for key, values in key_themes.items() if values and key != "priority_details"])
+            txt_prompt = "; ".join([f"{key}: {', '.join(values) if isinstance(values, list) else values}" for key, values in key_themes.items() if values and key != "priority_details" and key != "specific_phrases"])
             prompts.append((row_dict["file"], txt_prompt, key_themes))
         del chunk
         cleanup_memory()
@@ -501,18 +516,23 @@ def load_csv_rows_by_ids(csv_path, id_list, chunk_size=50):
         raise ValueError(f"No rows found in CSV with IDs: {id_list}")
     return prompts
 
+# Modified extract_theory_essence (unchanged logic, kept for completeness)
 def extract_theory_essence(prompt):
     match = re.search(r'\{txt_prompt\}\.\s*(.*?)\s*Do not include', prompt)
     if match:
         return match.group(1)
     return ""
 
+# Modified generate_metaphors_with_openai
 def generate_metaphors_with_openai(openai_util, key_themes, theory, focus, tokenizer, max_tokens=200):
     system_prompt = (
-        f"You are an expert in visual storytelling for {theory} psychotherapy. Generate unique, photorealistic visual metaphors for the provided transcript details, ensuring each metaphor vividly reflects the specific content and emotional tone (e.g., chaotic, hopeful, somber). "
-        f"Based on the transcript’s tone and content, determine an appropriate visual style (e.g., vibrant, muted, abstract) and decide whether the metaphors form a fragmented collage or a cohesive scene. "
+        f"You are an expert in visual storytelling for {theory} psychotherapy. Generate highly specific, photorealistic visual metaphors that vividly reflect the unique content, emotional tone (e.g., chaotic, hopeful, somber), and specific phrases from the provided transcript details. "
+        f"Each metaphor must be grounded in the transcript’s 'Priority Details,' 'Emotions,' 'Events,' 'Relationships,' and 'Specific Phrases,' using concrete objects, scenes, or actions directly inspired by the patient’s narrative (e.g., 'controlling parents' as a locked iron gate, 'job loss' as a shuttered storefront). "
         f"Align metaphors with the {theory} perspective, emphasizing {focus.lower()}. "
-        f"Output a list of metaphors, one for each priority detail, in the format: '[Detail]: [Metaphor description].' Avoid generic imagery (e.g., oceans, cliffs, forests). Target ~{max_tokens} tokens."
+        f"Determine the visual style (e.g., vibrant, muted, surreal) based on the transcript’s tone, and choose a composition type (e.g., cohesive scene, layered arrangement, dynamic interplay of elements) that best suits the narrative’s complexity, without defaulting to collages unless explicitly fitting. "
+        f"Output a list of metaphors, one for each priority detail, in the format: '[Detail]: [Metaphor description].' "
+        f"Explicitly avoid clichéd imagery (e.g., strings, threads, flowers, fragments, broken glass, mirrors, oceans, cliffs, forests, hearts, clouds). "
+        f"Target ~{max_tokens} tokens."
     )
     user_prompt = (
         f"Generate visual metaphors for these transcript details in a {theory} perspective, emphasizing {focus.lower()}:\n"
@@ -520,11 +540,11 @@ def generate_metaphors_with_openai(openai_util, key_themes, theory, focus, token
         f"Emotions: {', '.join(key_themes['emotions']) if key_themes['emotions'] else 'not specified'}.\n"
         f"Events: {', '.join(key_themes['events']) if key_themes['events'] else 'not specified'}.\n"
         f"Relationships: {', '.join(key_themes['relationships']) if key_themes['relationships'] else 'not specified'}.\n"
-        f"Themes: {', '.join(key_themes['themes']) if key_themes['themes'] else 'not specified'}.\n"
+        f"Specific Phrases: {', '.join(key_themes['specific_phrases']) if key_themes['specific_phrases'] else 'not specified'}.\n"
         f"Requirements:\n"
-        f"- Infer visual style from the transcript’s tone and content.\n"
-        f"- Choose a collage for complex/chaotic tones or a cohesive scene for unified/hopeful tones.\n"
-        f"- Ensure metaphors are unique, specific, and tied to the transcript’s content.\n"
+        f"- Create metaphors using concrete objects or scenes inspired by Specific Phrases, ensuring each is unique and directly tied to the transcript’s content.\n"
+        f"- Infer visual style (e.g., photorealistic, surreal, muted) and composition (e.g., cohesive scene, layered arrangement) from the transcript’s tone and complexity.\n"
+        f"- Avoid clichéd imagery and generic symbols at all costs.\n"
         f"Output metaphors as a list. Target ~{max_tokens} tokens."
     )
     messages = [
@@ -547,6 +567,7 @@ def generate_metaphors_with_openai(openai_util, key_themes, theory, focus, token
         logger.error(f"Failed to generate metaphors with OpenAI: {e}")
         return []
 
+# Modified refine_prompt_with_openai
 def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, theory, target_max_tokens=500):
     theory_guidelines = {
         "cbt": {"focus": "interplay of thoughts, emotions, behaviors"},
@@ -556,10 +577,11 @@ def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, t
     guideline = theory_guidelines.get(theory, {"focus": "general emotional landscape"})
     metaphor_mappings = generate_metaphors_with_openai(openai_util, key_themes, theory, guideline['focus'], tokenizer, max_tokens=200)
     system_prompt = (
-        f"You are an expert prompt engineer specializing in visual storytelling for {theory} psychotherapy. Craft a symbolic, photorealistic image prompt that vividly captures the client’s unique emotional landscape, inner conflicts, relationships, and life themes, prioritizing the specific details from 'Priority Details,' 'Emotions,' 'Events,' and 'Relationships.' "
-        f"Use the provided transcript-specific metaphors to create a highly detailed, evocative scene or collage, reflecting the transcript’s emotional tone (e.g., chaotic, hopeful). Each visual element must directly reflect the transcript’s unique content, weaving in short, impactful phrases from the details to inspire vivid imagery. "
-        f"Determine the visual style (e.g., vibrant, muted, abstract) based on the transcript’s tone and content, ensuring alignment with the {theory} perspective’s focus on {guideline['focus'].lower()}. "
-        f"The output must be coherent, fit a 1024x1024 image without cropping, and exclude text, therapy settings, or generic imagery (e.g., oceans, cliffs, forests)."
+        f"You are an expert prompt engineer specializing in visual storytelling for {theory} psychotherapy. Craft a photorealistic image prompt that vividly captures the client’s unique emotional landscape, inner conflicts, relationships, and life themes, prioritizing the specific details from 'Priority Details,' 'Emotions,' 'Events,' 'Relationships,' and 'Specific Phrases.' "
+        f"Use the provided transcript-specific metaphors as core visual elements, weaving in short, evocative phrases from 'Specific Phrases' to create a highly detailed, narrative-driven image. "
+        f"Determine the visual style (e.g., photorealistic, surreal, muted, vibrant) and composition type (e.g., cohesive scene, layered arrangement, dynamic interplay of elements) based on the transcript’s tone and complexity, ensuring alignment with the {theory} perspective’s focus on {guideline['focus'].lower()}. "
+        f"Each visual element must directly reflect the transcript’s unique content, avoiding clichéd imagery (e.g., strings, threads, flowers, fragments, broken glass, mirrors, oceans, cliffs, forests, hearts, clouds). "
+        f"The output must be coherent, fit a 1024x1024 image without cropping, and exclude text or therapy settings."
     )
     user_prompt = (
         f"Enhance the following base prompt for a {theory} perspective, emphasizing {guideline['focus'].lower()}:\n"
@@ -567,14 +589,13 @@ def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, t
         f"Emotions: {', '.join(key_themes['emotions']) if key_themes['emotions'] else 'not specified'}.\n"
         f"Events: {', '.join(key_themes['events']) if key_themes['events'] else 'not specified'}.\n"
         f"Relationships: {', '.join(key_themes['relationships']) if key_themes['relationships'] else 'not specified'}.\n"
-        f"Themes: {', '.join(key_themes['themes']) if key_themes['themes'] else 'not specified'}.\n"
+        f"Specific Phrases: {', '.join(key_themes['specific_phrases']) if key_themes['specific_phrases'] else 'not specified'}.\n"
+        f"Metaphors: {', '.join(metaphor_mappings) if metaphor_mappings else 'generate unique metaphors based on the details, weaving in phrases from Specific Phrases'}.\n"
         f"Requirements:\n"
-        f"- Infer visual style from the transcript’s tone and content.\n"
-        f"- Choose a collage for complex/chaotic tones or a cohesive scene for unified/hopeful tones.\n"
-        f"- Use these metaphors: {', '.join(metaphor_mappings) if metaphor_mappings else 'generate unique metaphors based on the details, weaving in phrases from Priority Details'}.\n"
-        f"- Craft a unique scene or collage that vividly reflects the transcript’s content, integrating short phrases from Priority Details into the narrative flow.\n"
-        f"- Avoid therapy settings, text, or generic scenes.\n"
-        f"- Ensure each visual element ties directly to the transcript for maximum specificity.\n"
+        f"- Create an image where each visual element is inspired by the Metaphors and Specific Phrases, integrating short phrases into the narrative flow.\n"
+        f"- Infer visual style and composition from the transcript’s tone and complexity, choosing from cohesive scenes, layered arrangements, or dynamic interplays, without defaulting to collages unless fitting.\n"
+        f"- Ensure each element is unique, specific, and avoids clichéd imagery.\n"
+        f"- Craft a vivid, photorealistic narrative that directly reflects the transcript’s content.\n"
         f"Target ~{target_max_tokens} tokens.\n\nBase Prompt:\n{base_prompt}"
     )
     messages = [
@@ -594,9 +615,9 @@ def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, t
         if token_count > target_max_tokens:
             refined_prompt = summarize_prompt(refined_prompt, max_tokens=target_max_tokens)
         second_user_prompt = (
-            f"Further refine the following prompt to make it even more specific to the transcript details, ensuring each visual element vividly reflects the unique 'Priority Details,' 'Emotions,' 'Events,' and 'Relationships.' "
-            f"Integrate short phrases from these details into a cohesive narrative or collage, maintaining the {theory} perspective’s focus on {guideline['focus'].lower()}. "
-            f"Infer the visual style from the transcript’s tone and content. Avoid generic imagery and ensure the prompt fits a 1024x1024 image without cropping.\n\nPrompt:\n{refined_prompt}"
+            f"Further refine the following prompt to make it even more specific to the transcript details, ensuring each visual element vividly reflects the unique 'Priority Details,' 'Emotions,' 'Events,' 'Relationships,' and 'Specific Phrases.' "
+            f"Integrate short phrases from Specific Phrases into a cohesive narrative, maintaining the {theory} perspective’s focus on {guideline['focus'].lower()}. "
+            f"Infer the visual style and composition (e.g., cohesive scene, layered arrangement, dynamic interplay) from the transcript’s tone and complexity, avoiding clichéd imagery (e.g., strings, threads, flowers, fragments, broken glass, mirrors, oceans, cliffs, forests, hearts, clouds) and ensuring the prompt fits a 1024x1024 image without cropping.\n\nPrompt:\n{refined_prompt}"
         )
         second_messages = [
             {"role": "system", "content": system_prompt},
@@ -618,6 +639,7 @@ def refine_prompt_with_openai(openai_util, base_prompt, tokenizer, key_themes, t
         logger.error(f"Failed to refine prompt with OpenAI: {e}")
         return base_prompt
 
+# Modified generate_images_for_csv_rows
 def generate_images_for_csv_rows(
     csv_path,
     yaml_path,
@@ -673,7 +695,9 @@ def generate_images_for_csv_rows(
     row_prompts = load_csv_rows_by_ids(csv_path, id_list, chunk_size=50)
     os.makedirs(output_dir, exist_ok=True)
     negative_prompt = (
-        "text, words, letters, low quality, blurry, distorted, generic landscapes, repetitive imagery, overly abstract, oceans, cliffs, forests, therapy settings, clinical environments"
+        "text, words, letters, low quality, blurry, distorted, generic landscapes, repetitive imagery, overly abstract, "
+        "strings, threads, flowers, fragments, broken glass, mirrors, oceans, cliffs, forests, hearts, clouds, "
+        "generic symbols, clichéd motifs, therapy settings, clinical environments"
     )
     prompt_cache = LRUCache(capacity=100)
     chunked_rows = [row_prompts[i:i + chunk_size] for i in range(0, len(row_prompts), chunk_size)]
@@ -694,12 +718,15 @@ def generate_images_for_csv_rows(
                 logger.info(f"Generating image for theory: {theory}")
                 logger.info(f"Refined prompt: {refined_prompt}...")
                 try:
+                    # Randomize guidance scale for diversity
+                    guidance_scale = random.uniform(10.0, 14.0)
+                    logger.debug(f"Using guidance scale: {guidance_scale}")
                     images = custom_pipeline(
                         prompt=refined_prompt,
                         height=1024,
                         width=1024,
                         num_inference_steps=150,
-                        guidance_scale=12.0,
+                        guidance_scale=guidance_scale,
                         negative_prompt=negative_prompt,
                         num_images_per_prompt=1,
                     )
