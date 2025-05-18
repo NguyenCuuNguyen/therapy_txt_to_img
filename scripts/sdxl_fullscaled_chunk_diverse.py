@@ -755,4 +755,4 @@ if __name__ == "__main__":
     csv_path = "/home/iris/Documents/deep_learning/data/input_csv/FILE_SUPERTOPIC_DESCRIPTION.csv"
     yaml_path = "/home/iris/Documents/deep_learning/config/prompt_config.yaml"
     id_list_path = "/home/iris/Documents/deep_learning/data/sample_list.txt"
-    generate_images_for_csv_rows(csv_path, yaml_path, id_list_path)
+    generate_images_for_csv_rows(csv_path, yaml_path, id_list_path)# Temporary comment
