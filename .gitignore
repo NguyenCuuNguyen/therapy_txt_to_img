@@ -1,0 +1,17 @@
+config/config.yaml
+data/
+experiments/
+generated_images/
+*.log
+src/logs/
+misc/
+*.sh
+*.zip
+*.tar
+*.pt
+*.h5
+Miniconda3-latest-Linux-x86_64.sh
+test.ipynb
+*.png
+generated_images/
+*.ipynb
